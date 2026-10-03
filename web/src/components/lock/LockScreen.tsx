@@ -4,8 +4,9 @@ import { cn, formatTime } from "@/lib/utils";
 import { APP_NAME } from "@/lib/brand";
 import { loginUrl } from "@/api";
 import { useAppLock, settleLockScreen, unlock, enterApp, fmtWait } from "@/lib/appLock";
-import { PinPad } from "@/components/lock/PinPad";
+import { usePinPad } from "@/components/lock/PinPad";
 import { Button } from "@/components/ui/button";
+import { useMedia } from "@/hooks/useMedia";
 
 // The whole page while this browser is locked (lib/appLock.ts). It is rendered INSTEAD of the app - no shell,
 // no providers, no data - and it shows nothing of the app either: a picture of the app, even blurred, would be
@@ -38,6 +39,11 @@ export function LockScreen() {
   const [helpOpen, setHelpOpen] = React.useState(false);
   const now = useNow(1_000);
   const length = hint?.pinLength ?? 6;
+  // The three arrangements differ in what sits where, not only in size, so the fork is in JS; the PIN and
+  // its phase live up here and carry across a turn of the phone.
+  const sideways = useMedia("(max-height: 480px)");
+  const phone = useMedia("(max-width: 639px)");
+  const layout = sideways ? "landscape" : phone ? "phone" : "default";
 
   React.useEffect(() => {
     document.title = `Locked · ${APP_NAME}`;
@@ -97,78 +103,138 @@ export function LockScreen() {
               ? "Your session has ended. Sign in again, then enter your PIN."
               : "";
 
-  return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="lock-title"
-      className="relative flex min-h-[100dvh] flex-col items-center justify-between overflow-hidden bg-background px-4 pb-[calc(1.5rem+env(safe-area-inset-bottom))] pt-[calc(2.5rem+env(safe-area-inset-top))] text-foreground"
-    >
-      {/* Brand light, not a picture of the app. */}
-      <div aria-hidden className="lock-aurora pointer-events-none absolute inset-0" />
+  const { field, keypad } = usePinPad({
+    length,
+    value: pin,
+    onChange: (v) => {
+      setPin(v);
+      if (phase.kind === "wrong" || phase.kind === "failed" || phase.kind === "offline") setPhase({ kind: "ready" });
+    },
+    onComplete: (v) => void submit(v),
+    label: `Enter your ${length}-digit PIN`,
+    disabled: busy,
+    shake,
+    keypad: true,
+    size: layout,
+    autoFocus: true,
+    keepFocus: true,
+    tone: phase.kind === "opening" ? "success" : phase.kind === "wrong" ? "error" : "default",
+  });
 
-      <div className="relative flex flex-col items-center text-center">
-        <p className="text-6xl font-semibold tabular-nums tracking-tight sm:text-7xl">
-          {formatTime(now)}
+  const clock = (
+    <div className="relative flex flex-col items-center text-center">
+      <p className={cn("font-semibold tabular-nums tracking-tight", layout === "default" ? "text-6xl sm:text-7xl" : "text-5xl")}>{formatTime(now)}</p>
+      <p className="mt-1 text-sm text-muted-foreground sm:text-base">{now.toLocaleDateString([], { weekday: "long", day: "numeric", month: "long" })}</p>
+    </div>
+  );
+  // On a phone short enough that the keys would be squeezed, the avatar gives its room to them.
+  const avatar = (
+    <div className={cn("mb-4 flex h-16 w-16 shrink-0 items-center justify-center rounded-full bg-primary text-2xl font-semibold text-primary-foreground shadow-lg transition-transform", layout === "phone" && "[@media(max-height:700px)]:hidden", phase.kind === "opening" && "scale-110")}>
+      {phase.kind === "opening" ? <LockOpen className="h-7 w-7" /> : initials || <Lock className="h-7 w-7" />}
+    </div>
+  );
+  const heading = (
+    <>
+      <h1 id="lock-title" className="text-lg font-semibold">
+        {phase.kind === "opening" ? "Unlocked" : hint?.firstName ? `Welcome back, ${hint.firstName}` : `${APP_NAME} is locked`}
+      </h1>
+      <p className={cn("mt-1 text-sm text-muted-foreground", layout === "default" ? "mb-7" : "mb-5")}>
+        {phase.kind === "opening" ? "Opening…" : `Enter your ${length}-digit PIN to unlock`}
+      </p>
+    </>
+  );
+  const status = (
+    <>
+      <p role="status" aria-live="polite" className={cn("min-h-[1.25rem] text-sm", layout === "default" ? "mt-5" : "mt-4", phase.kind === "offline" ? "text-muted-foreground" : "text-destructive")}>
+        {phase.kind === "offline" && <WifiOff className="mr-1 inline h-4 w-4" />}
+        {message}
+      </p>
+      {phase.kind === "signed-out" && (
+        <Button className="mt-2" onClick={() => (window.location.href = loginUrl())}>
+          Sign in
+        </Button>
+      )}
+    </>
+  );
+  const footer = (
+    <div className="relative flex w-full max-w-sm flex-col items-center gap-2 text-sm">
+      {helpOpen && (
+        <p className="rounded-lg border bg-card px-4 py-3 text-center text-muted-foreground shadow-sm">
+          An HR or IT admin can reset your PIN from Settings, Users. You'll be signed out everywhere and can set a new one after you sign in.
         </p>
-        <p className="mt-1 text-sm text-muted-foreground sm:text-base">{now.toLocaleDateString([], { weekday: "long", day: "numeric", month: "long" })}</p>
-      </div>
-
-      <div className="relative flex w-full max-w-sm flex-col items-center">
-        <div className={cn("mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-primary text-2xl font-semibold text-primary-foreground shadow-lg transition-transform", phase.kind === "opening" && "scale-110")}>
-          {phase.kind === "opening" ? <LockOpen className="h-7 w-7" /> : initials || <Lock className="h-7 w-7" />}
-        </div>
-        <h1 id="lock-title" className="text-lg font-semibold">
-          {phase.kind === "opening" ? "Unlocked" : hint?.firstName ? `Welcome back, ${hint.firstName}` : `${APP_NAME} is locked`}
-        </h1>
-        <p className="mb-7 mt-1 text-sm text-muted-foreground">
-          {phase.kind === "opening" ? "Opening…" : `Enter your ${length}-digit PIN to unlock`}
-        </p>
-
-        <PinPad
-          length={length}
-          value={pin}
-          onChange={(v) => {
-            setPin(v);
-            if (phase.kind === "wrong" || phase.kind === "failed" || phase.kind === "offline") setPhase({ kind: "ready" });
-          }}
-          onComplete={(v) => void submit(v)}
-          label={`Enter your ${length}-digit PIN`}
-          disabled={busy}
-          shake={shake}
-          keypad
-          autoFocus
-          keepFocus
-          tone={phase.kind === "opening" ? "success" : phase.kind === "wrong" ? "error" : "default"}
-        />
-
-        <p role="status" aria-live="polite" className={cn("mt-5 min-h-[1.25rem] text-sm", phase.kind === "offline" ? "text-muted-foreground" : "text-destructive")}>
-          {phase.kind === "offline" && <WifiOff className="mr-1 inline h-4 w-4" />}
-          {message}
-        </p>
-        {phase.kind === "signed-out" && (
-          <Button className="mt-2" onClick={() => (window.location.href = loginUrl())}>
-            Sign in
-          </Button>
-        )}
-      </div>
-
-      <div className="relative flex w-full max-w-sm flex-col items-center gap-2 text-sm">
-        {helpOpen && (
-          <p className="rounded-lg border bg-card px-4 py-3 text-center text-muted-foreground shadow-sm">
-            An HR or IT admin can reset your PIN from Settings, Users. You'll be signed out everywhere and can set a new one after you sign in.
-          </p>
-        )}
-        <div className="flex items-center gap-4">
-          <button type="button" className="rounded px-2 py-1 text-muted-foreground hover:text-foreground" onClick={() => setHelpOpen((o) => !o)}>
-            Forgot PIN?
-          </button>
-          <span aria-hidden className="text-muted-foreground/40">·</span>
-          <button type="button" className="inline-flex items-center gap-1.5 rounded px-2 py-1 text-muted-foreground hover:text-foreground" onClick={() => void signOut()}>
-            <LogOut className="h-3.5 w-3.5" /> Not you? Sign out
-          </button>
-        </div>
+      )}
+      <div className="flex items-center gap-4">
+        <button type="button" className="rounded px-2 py-1 text-muted-foreground hover:text-foreground" onClick={() => setHelpOpen((o) => !o)}>
+          Forgot PIN?
+        </button>
+        <span aria-hidden className="text-muted-foreground/40">·</span>
+        <button type="button" className="inline-flex items-center gap-1.5 rounded px-2 py-1 text-muted-foreground hover:text-foreground" onClick={() => void signOut()}>
+          <LogOut className="h-3.5 w-3.5" /> Not you? Sign out
+        </button>
       </div>
     </div>
+  );
+  const shell = (className: string, children: React.ReactNode) => (
+    <div role="dialog" aria-modal="true" aria-labelledby="lock-title" className={cn("relative flex min-h-[100dvh] overflow-hidden bg-background text-foreground", className)}>
+      {/* Brand light, not a picture of the app. */}
+      <div aria-hidden className="lock-aurora pointer-events-none absolute inset-0" />
+      {children}
+    </div>
+  );
+
+  // A phone held sideways: the pad beside everything else, since four rows of keys under a clock do not fit
+  // in its height.
+  if (layout === "landscape")
+    return shell(
+      "items-center justify-center gap-10 py-[calc(1rem+env(safe-area-inset-top))] pl-[calc(1.5rem+env(safe-area-inset-left))] pr-[calc(1.5rem+env(safe-area-inset-right))]",
+      <>
+        <div className="relative flex max-w-xs flex-col items-center text-center">
+          {clock}
+          <div className="mt-4 flex flex-col items-center">
+            {heading}
+            {field}
+            {status}
+          </div>
+          <div className="mt-3">{footer}</div>
+        </div>
+        <div className="relative">{keypad}</div>
+      </>,
+    );
+
+  // A phone upright: the pad at the bottom, where a thumb reaches all four rows of it one-handed, and the
+  // name and dots in the space between it and the clock.
+  if (layout === "phone")
+    return shell(
+      "flex-col items-center px-4 pb-[calc(1rem+env(safe-area-inset-bottom))] pt-[calc(1.5rem+env(safe-area-inset-top))]",
+      <>
+        {clock}
+        <div className="relative flex w-full max-w-sm flex-1 flex-col items-center justify-center py-4 text-center">
+          {avatar}
+          {heading}
+          {field}
+          {status}
+        </div>
+        <div className="relative flex w-full flex-col items-center gap-4">
+          {keypad}
+          {footer}
+        </div>
+      </>,
+    );
+
+  return shell(
+    "flex-col items-center justify-between px-4 pb-[calc(1.5rem+env(safe-area-inset-bottom))] pt-[calc(2.5rem+env(safe-area-inset-top))]",
+    <>
+      {clock}
+      <div className="relative flex w-full max-w-sm flex-col items-center">
+        {avatar}
+        {heading}
+        <div className="flex flex-col items-center gap-6">
+          {field}
+          {keypad}
+        </div>
+        {status}
+      </div>
+      {footer}
+    </>,
   );
 }

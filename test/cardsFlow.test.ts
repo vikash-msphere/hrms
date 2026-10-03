@@ -15,6 +15,7 @@ import { createGoal } from "../src/services/goals";
 import { createSprint, activateSprint, completeSprint } from "../src/services/sprints";
 import { listActivity, listAllActivity } from "../src/services/activity";
 import { etagOf } from "../src/http/serialize";
+import { DEFAULT_BOARD_COLUMNS, parseColumns } from "../src/domain/boards";
 
 // Real-D1 (miniflare) flow test for the kanban board: WIP enforcement, commitment/delivery timestamps, the
 // movement log feeding analytics, and the delivery -> goal roll-up. Exercises the actual services end to end.
@@ -49,13 +50,52 @@ async function seedActor(): Promise<AppUser> {
 
 const cardRow = (id: string) => deps.db.select().from(schema.cards).where(eq(schema.cards.uuid, id)).limit(1).then((r) => r[0]!);
 
+// The starter columns with new tasks allowed in exactly `keys`, for a test that files work straight into a later column.
+const openColumns = (actor: AppUser, boardId: string, keys: string[]) =>
+  configureBoard(deps, actor, boardId, { columns: DEFAULT_BOARD_COLUMNS.map((c) => ({ ...c, allowCreate: keys.includes(c.key) })) });
+
+describe("which columns take new tasks", () => {
+  it("files an unnamed task into the first column that takes new tasks, not the first column", async () => {
+    const actor = await seedActor();
+    const board = await createBoard(deps, actor, { name: "Entry board" });
+    await openColumns(actor, board.uuid, ["ready"]);
+    const card = await createCard(deps, actor, { board: `boards/${board.uuid}`, title: "Unnamed" });
+    expect(card.columnKey).toBe("ready");
+  });
+
+  it("refuses a task created straight into a column that does not take new tasks", async () => {
+    const actor = await seedActor();
+    const board = await createBoard(deps, actor, { name: "Closed columns" });
+    const b = `boards/${board.uuid}`;
+    await expect(createCard(deps, actor, { board: b, title: "Skips the flow", column_key: "in_progress" })).rejects.toThrow(/doesn't take new tasks/);
+    // Moving a task there is the way in, and stays allowed.
+    const card = await createCard(deps, actor, { board: b, title: "Through the front", column_key: "backlog" });
+    await expect(moveCard(deps, actor, card.uuid, { column: "in_progress" })).resolves.toBeTruthy();
+  });
+
+  it("refuses a board configuration where no column takes new tasks", async () => {
+    const actor = await seedActor();
+    const board = await createBoard(deps, actor, { name: "Sealed board" });
+    await expect(openColumns(actor, board.uuid, [])).rejects.toThrow(/at least one column/);
+  });
+
+  it("a stored board without the setting still reads its columns", () => {
+    // Rows saved before the setting existed carry no `allowCreate`; parsing must not drop the board's columns
+    // (migration 0009 then opens their first column).
+    const legacy = JSON.stringify(DEFAULT_BOARD_COLUMNS.map(({ allowCreate: _, ...c }) => c));
+    const cols = parseColumns(legacy);
+    expect(cols.map((c) => c.key)).toEqual(DEFAULT_BOARD_COLUMNS.map((c) => c.key));
+    expect(cols.every((c) => c.allowCreate === false)).toBe(true);
+  });
+});
+
 describe("kanban flow: WIP + timestamps + movements + goal roll-up", () => {
   it("enforces the destination column's WIP limit", async () => {
     const actor = await seedActor();
     const board = await createBoard(deps, actor, { name: "WIP board" });
     await configureBoard(deps, actor, board.uuid, {
       columns: [
-        { key: "todo", label: "To do", wipLimit: null, policy: "", commitment: false, delivery: false },
+        { key: "todo", label: "To do", wipLimit: null, policy: "", commitment: false, delivery: false, allowCreate: true },
         { key: "doing", label: "Doing", wipLimit: 1, policy: "", commitment: true, delivery: false },
         { key: "done", label: "Done", wipLimit: null, policy: "", commitment: false, delivery: true },
       ],
@@ -97,7 +137,7 @@ describe("kanban flow: WIP + timestamps + movements + goal roll-up", () => {
     const board = await createBoard(deps, actor, { name: "Per-assignee WIP" });
     await configureBoard(deps, actor, board.uuid, {
       columns: [
-        { key: "todo", label: "To do", wipLimit: null, policy: "", commitment: false, delivery: false },
+        { key: "todo", label: "To do", wipLimit: null, policy: "", commitment: false, delivery: false, allowCreate: true },
         { key: "doing", label: "Doing", wipLimit: 1, limitScope: "assignee", policy: "", commitment: true, delivery: false },
         { key: "done", label: "Done", wipLimit: null, policy: "", commitment: false, delivery: true },
       ],
@@ -155,7 +195,7 @@ describe("kanban flow: WIP + timestamps + movements + goal roll-up", () => {
     const board = await createBoard(deps, actor, { name: "Metrics board" });
     await configureBoard(deps, actor, board.uuid, {
       columns: [
-        { key: "backlog", label: "Backlog", wipLimit: null, policy: "", commitment: false, delivery: false },
+        { key: "backlog", label: "Backlog", wipLimit: null, policy: "", commitment: false, delivery: false, allowCreate: true },
         { key: "ready", label: "Ready", wipLimit: null, policy: "", commitment: true, delivery: false },
         { key: "done", label: "Done", wipLimit: null, policy: "", commitment: false, delivery: true },
       ],
@@ -599,6 +639,7 @@ describe("card numbering survives the aggregate rewrite", () => {
     const actor = await seedActor();
     const board = await createBoard(deps, actor, { name: "Ranking" });
     const b = `boards/${board.uuid}`;
+    await openColumns(actor, board.uuid, ["backlog", "review"]);
 
     const t1 = await createCard(deps, actor, { board: b, title: "backlog one", column_key: "backlog" });
     const t2 = await createCard(deps, actor, { board: b, title: "backlog two", column_key: "backlog" });
@@ -618,6 +659,7 @@ describe("card numbering survives the aggregate rewrite", () => {
     const actor = await seedActor();
     const board = await createBoard(deps, actor, { name: "Moving" });
     const b = `boards/${board.uuid}`;
+    await openColumns(actor, board.uuid, ["backlog", "review"]);
     const d1 = await createCard(deps, actor, { board: b, title: "review one", column_key: "review" });
     const t1 = await createCard(deps, actor, { board: b, title: "backlog one", column_key: "backlog" });
 

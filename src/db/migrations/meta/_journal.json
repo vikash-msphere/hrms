@@ -64,6 +64,13 @@
       "when": 1791013832280,
       "tag": "0008_release_eight",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1791057624095,
+      "tag": "0009_board_column_allow_create",
+      "breakpoints": true
     }
   ]
 }

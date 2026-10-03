@@ -21,7 +21,7 @@ import { emitEvent } from "./eventBus";
 import { updateGoalProgress } from "./goals";
 import { notify } from "./notifications";
 import { notifyMentions } from "./mentions";
-import { parseColumns, commitmentIndex, columnIndex, normalizeLabelKeys, CARD_PRIORITIES, type CardPriority } from "../domain/boards";
+import { parseColumns, commitmentIndex, columnIndex, entryColumn, normalizeLabelKeys, CARD_PRIORITIES, type CardPriority } from "../domain/boards";
 import { runBatch, insertBatches, byIdChunks } from "../lib/dbBatch";
 import { checkEtag, updateAtVersion } from "./versionGuard";
 
@@ -546,8 +546,14 @@ export async function createCard(deps: Deps, actor: AppUser, input: CardInput, i
   if (!board || board.deleteTime) throw notFound("board not found");
   const cols = parseColumns(board.columnsJson);
   if (!cols.length) throw failedPrecondition("the board has no columns yet");
-  const columnKey = input.column_key ?? cols[0]!.key;
-  if (columnIndex(cols, columnKey) < 0) throw invalidArgument("column_key is not a column on this board");
+  // A task is created only in a column that takes new tasks (`allowCreate`); unnamed, it lands in the first
+  // one. Later columns are reached by moving the task, which is what keeps their flow timestamps and WIP honest.
+  const named = input.column_key != null ? cols[columnIndex(cols, input.column_key)] : undefined;
+  if (input.column_key != null && !named) throw invalidArgument("column_key is not a column on this board");
+  if (named && !named.allowCreate) throw failedPrecondition(`"${named.label}" doesn't take new tasks; create it in a column that does, then move it there`);
+  const entry = named ?? entryColumn(cols);
+  if (!entry) throw failedPrecondition("no column on this board allows new tasks to be created in it");
+  const columnKey = entry.key;
   const employeeId = idFromPath(input.employee) ?? actor.employeeId;
   if (!employeeId) throw invalidArgument("employee is required");
   // Department: explicit value (incl. null) wins; when the key is omitted, fall back to the org default.

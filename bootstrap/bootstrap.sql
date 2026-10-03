@@ -1822,10 +1822,10 @@ INSERT INTO asset_categories (uuid,code,name,tag_code,requires_serial,created_at
  ('0000000001tne','02','Desktop','DSK',1,1700000000000,1700000000000),
  ('0000000001tng','03','Phone','PHN',1,1700000000000,1700000000000),
  ('0000000001tnj','04','Monitor','MON',1,1700000000000,1700000000000),
- ('0000000001tnm','05','Peripheral','PER',0,1700000000000,1700000000000),
- ('0000000001tnp','06','Networking','NET',1,1700000000000,1700000000000),
- ('0000000001tnr','07','Furniture','FUR',0,1700000000000,1700000000000),
- ('0000000001tnt','08','Access Card','ACC',0,1700000000000,1700000000000),
+ ('0000000001tnm','05','Networking','NET',1,1700000000000,1700000000000),
+ ('0000000001tnp','06','Furniture','FUR',0,1700000000000,1700000000000),
+ ('0000000001tnr','07','Access Card','ACC',0,1700000000000,1700000000000),
+ ('0000000001tnt','08','Office Key','KEY',0,1700000000000,1700000000000),
  ('0000000001tnw','09','Other','OTH',0,1700000000000,1700000000000);
 INSERT INTO pay_components (uuid,code,name,kind,method,rate,cap,regime,recurring,in_ctc,pf_wages,created_at,updated_at) VALUES
  ('0000000001tny','01','House Rent Allowance','earning','percent_base',40,NULL,NULL,1,1,0,1700000000000,1700000000000),
@@ -1875,7 +1875,7 @@ INSERT INTO shifts (uuid,code,name,start_time,end_time,break_minutes,color,creat
  ('0000000001trc','03','Evening','14:00','22:00',30,'#8b5cf6',1700000000000,1700000000000),
  ('0000000001tre','04','Night','22:00','06:00',30,'#1f2937',1700000000000,1700000000000);
 INSERT INTO boards (uuid,code,name,description,task_prefix,mode,columns_json,swimlane_mode,swimlanes_json,labels_json,created_at,updated_at) VALUES
- ('0000000001trg','ve-01','General','Team work board — group tasks by type using the swimlanes.','GEN','kanban','[{"key":"backlog","label":"Backlog","wipLimit":null,"policy":"Anything proposed. Not yet committed.","commitment":false,"delivery":false},{"key":"ready","label":"Ready","wipLimit":5,"policy":"Refined, estimated, and ready to pull. Entering here commits the work.","commitment":true,"delivery":false},{"key":"in_progress","label":"In progress","wipLimit":3,"policy":"Actively being worked. One person, one card.","commitment":false,"delivery":false},{"key":"review","label":"Review","wipLimit":3,"policy":"Awaiting review / verification.","commitment":false,"delivery":false},{"key":"done","label":"Done","wipLimit":null,"policy":"Accepted and delivered.","commitment":false,"delivery":true}]','custom','[{"key":"feature","label":"Feature"},{"key":"bug","label":"Bug"},{"key":"chore","label":"Chore"},{"key":"tech_debt","label":"Tech debt"}]','[]',1700000000000,1700000000000);
+ ('0000000001trg','ve-01','General','Team work board — group tasks by type using the swimlanes.','GEN','kanban','[{"key":"backlog","label":"Backlog","wipLimit":null,"policy":"Anything proposed. Not yet committed.","commitment":false,"delivery":false,"allowCreate":true},{"key":"ready","label":"Ready","wipLimit":5,"policy":"Refined, estimated, and ready to pull. Entering here commits the work.","commitment":true,"delivery":false,"allowCreate":false},{"key":"in_progress","label":"In progress","wipLimit":3,"policy":"Actively being worked. One person, one card.","commitment":false,"delivery":false,"allowCreate":false},{"key":"review","label":"Review","wipLimit":3,"policy":"Awaiting review / verification.","commitment":false,"delivery":false,"allowCreate":false},{"key":"done","label":"Done","wipLimit":null,"policy":"Accepted and delivered.","commitment":false,"delivery":true,"allowCreate":false}]','custom','[{"key":"feature","label":"Feature"},{"key":"bug","label":"Bug"},{"key":"chore","label":"Chore"},{"key":"tech_debt","label":"Tech debt"}]','[]',1700000000000,1700000000000);
 INSERT INTO compliance_rules (uuid,code,title,category,frequency,due_day,anchor_month,notes,active,created_at,updated_at) VALUES
  ('0000000001trj','01','EPF contribution & ECR','EPFO','monthly',15,NULL,'Deposit + electronic challan-cum-return for the previous month.',1,1700000000000,1700000000000),
  ('0000000001trm','02','ESI contribution','ESIC','monthly',15,NULL,'Deposit for the previous month.',1,1700000000000,1700000000000),

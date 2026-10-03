@@ -9,10 +9,10 @@ const ASSET_CATEGORIES: AssetCategorySeed[] = [
   { name: "Desktop", tagCode: "DSK", requiresSerial: true },
   { name: "Phone", tagCode: "PHN", requiresSerial: true },
   { name: "Monitor", tagCode: "MON", requiresSerial: true },
-  { name: "Peripheral", tagCode: "PER", requiresSerial: false },
   { name: "Networking", tagCode: "NET", requiresSerial: true },
   { name: "Furniture", tagCode: "FUR", requiresSerial: false },
   { name: "Access Card", tagCode: "ACC", requiresSerial: false },
+  { name: "Office Key", tagCode: "KEY", requiresSerial: false },
   { name: "Other", tagCode: "OTH", requiresSerial: false },
 ];
 

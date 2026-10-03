@@ -17,7 +17,7 @@ import { invalidArgument, notFound, aborted } from "../lib/errors";
 import { etagOf } from "../http/serialize";
 import { deleteStateFilter, softDeleteRow, restoreRow, purgeRow, type PurgeCascade } from "./softDelete";
 import {
-  DEFAULT_BOARD_COLUMNS, DEFAULT_SCRUM_COLUMNS, normalizeColumns, normalizeSwimlanes, normalizeLabels,
+  DEFAULT_BOARD_COLUMNS, DEFAULT_SCRUM_COLUMNS, normalizeColumns, requireEntryColumn, normalizeSwimlanes, normalizeLabels,
   normalizePrefix, derivePrefix, parseColumns, type SwimlaneMode, SWIMLANE_MODES,
 } from "../domain/boards";
 import { computeBoardMetrics } from "../domain/boardMetrics";
@@ -103,7 +103,7 @@ export async function createBoard(deps: Deps, actor: AppUser, input: BoardInput,
   const name = input.name.trim();
   const mode = (input.swimlane_mode ?? "none") as SwimlaneMode;
   if (!SWIMLANE_MODES.includes(mode)) throw invalidArgument("swimlane_mode is invalid");
-  const columns = input.columns != null ? asArgError(() => normalizeColumns(input.columns)) : input.mode === "scrum" ? DEFAULT_SCRUM_COLUMNS : DEFAULT_BOARD_COLUMNS;
+  const columns = input.columns != null ? asArgError(() => requireEntryColumn(normalizeColumns(input.columns))) : input.mode === "scrum" ? DEFAULT_SCRUM_COLUMNS : DEFAULT_BOARD_COLUMNS;
   const swimlanes = asArgError(() => normalizeSwimlanes(input.swimlanes ?? []));
   const departmentId = idFromPath(input.department) ?? null;
   await assertMayFileUnder(deps, actor, departmentId, true);
@@ -242,7 +242,7 @@ export async function configureBoard(deps: Deps, actor: AppUser, id: string, inp
   const row = await getBoard(deps, actor, id);
   const set: SetOf<typeof schema.boards> = { updatedAt: new Date() };
   const has = (k: keyof BoardInput) => Object.prototype.hasOwnProperty.call(input, k);
-  if (has("columns")) set.columnsJson = JSON.stringify(asArgError(() => normalizeColumns(input.columns)));
+  if (has("columns")) set.columnsJson = JSON.stringify(asArgError(() => requireEntryColumn(normalizeColumns(input.columns))));
   if (has("swimlane_mode")) {
     const mode = input.swimlane_mode as SwimlaneMode;
     if (!SWIMLANE_MODES.includes(mode)) throw invalidArgument("swimlane_mode is invalid");

@@ -2484,7 +2484,7 @@ components:
           description: "Ordered columns; a column IS the workflow state. Set via :configure. Keys are camelCase here because this is a stored JSON blob, not a wire resource."
           items:
             type: object
-            required: [key, label, wipLimit, policy, commitment, delivery]
+            required: [key, label, wipLimit, policy, commitment, delivery, allowCreate]
             properties:
               key: { type: string }
               label: { type: string }
@@ -2493,6 +2493,7 @@ components:
               policy: { type: string, description: "The column's explicit policy text (what it means for work to sit here)." }
               commitment: { type: boolean, description: "Entering this column commits the work and starts lead time." }
               delivery: { type: boolean, description: "Entering this column delivers the work and ends lead/cycle time." }
+              allowCreate: { type: boolean, description: "New tasks may be created straight into this column. Off unless set; at least one column must allow it, and the first that does is where a task created without a column_key lands. Other columns are reached by moving a task." }
         swimlane_mode: { type: string, enum: [none, assignee, goal, priority, department, custom] }
         no_lane_label: { type: string, description: "Custom mode: label for the catch-all bucket (default \"No lane\")." }
         hide_empty_lanes: { type: boolean, description: "Board view: hide swimlanes that have no visible cards." }
@@ -2542,7 +2543,7 @@ components:
         sprint: { type: string, description: "Resource path: sprints/{sprint_id}. Scrum: the sprint the card is in (null = product backlog)." }
         employee: { type: string, description: "Resource path: employees/{employee_id}. Owner; defaults to the caller." }
         department: { type: string, description: "Resource path: departments/{department_id}. The card's department; omit to default to the org default department, null to clear." }
-        column_key: { type: string, description: "The card's current column (= state). Defaults to the first column." }
+        column_key: { type: string, description: "The card's current column (= state). On create it must be a column with allowCreate (409 failed-precondition otherwise); omitted, the first such column." }
         column_since_time:
           type: string
           format: date-time

@@ -6,7 +6,10 @@
 // `policy` is the explicit column policy (definition of done / entry criteria) shown on the header. Exactly one
 // column should carry `commitment` (work is committed to on entry -> starts lead time) and one `delivery`
 // (work is delivered on entry -> ends lead/cycle time); columns before the commitment point are the "options"
-// backlog (uncommitted).
+// backlog (uncommitted). `allowCreate` says whether a new task may be created straight into the column; off
+// unless turned on, so work enters a board where the team decided it does and reaches the later columns by
+// being moved there. A board needs at least one such column (`requireEntryColumn`), and the first one is where
+// a task filed without naming a column lands (`entryColumn`).
 // How a column's WIP limit is counted: board-wide (every card in the column, the canonical Kanban constraint)
 // or per assignee (each person may hold at most `wipLimit` cards in the column). Default column-wide.
 export type WipScope = "column" | "assignee";
@@ -18,6 +21,7 @@ export type BoardColumn = {
   policy: string;
   commitment: boolean;
   delivery: boolean;
+  allowCreate: boolean;
 };
 
 export type SwimlaneMode = "none" | "assignee" | "goal" | "priority" | "department" | "custom";
@@ -33,23 +37,24 @@ export const CARD_PRIORITIES = ["low", "medium", "high", "urgent"] as const;
 export type CardPriority = (typeof CARD_PRIORITIES)[number];
 
 // Sensible starter board: an options backlog, a committed "Ready" column, work + review WIP-limited columns,
-// and a delivery "Done" column. Teams reshape it via the `configure` verb.
+// and a delivery "Done" column. New tasks are created in the backlog only. Teams reshape it via the `configure` verb.
 export const DEFAULT_BOARD_COLUMNS: BoardColumn[] = [
-  { key: "backlog", label: "Backlog", wipLimit: null, policy: "Anything proposed. Not yet committed.", commitment: false, delivery: false },
-  { key: "ready", label: "Ready", wipLimit: 5, policy: "Refined, estimated, and ready to pull. Entering here commits the work.", commitment: true, delivery: false },
-  { key: "in_progress", label: "In progress", wipLimit: 3, policy: "Actively being worked. One person, one card.", commitment: false, delivery: false },
-  { key: "review", label: "Review", wipLimit: 3, policy: "Awaiting review / verification.", commitment: false, delivery: false },
-  { key: "done", label: "Done", wipLimit: null, policy: "Accepted and delivered.", commitment: false, delivery: true },
+  { key: "backlog", label: "Backlog", wipLimit: null, policy: "Anything proposed. Not yet committed.", commitment: false, delivery: false, allowCreate: true },
+  { key: "ready", label: "Ready", wipLimit: 5, policy: "Refined, estimated, and ready to pull. Entering here commits the work.", commitment: true, delivery: false, allowCreate: false },
+  { key: "in_progress", label: "In progress", wipLimit: 3, policy: "Actively being worked. One person, one card.", commitment: false, delivery: false, allowCreate: false },
+  { key: "review", label: "Review", wipLimit: 3, policy: "Awaiting review / verification.", commitment: false, delivery: false, allowCreate: false },
+  { key: "done", label: "Done", wipLimit: null, policy: "Accepted and delivered.", commitment: false, delivery: true, allowCreate: false },
 ];
 
 // Scrum default columns: the IN-SPRINT workflow only (the product backlog is the separate "no sprint" set,
 // so there is deliberately no "Backlog" column here). Entering "To do" commits the item to the sprint board
-// (lead time starts); "Done" is the delivery point.
+// (lead time starts); "Done" is the delivery point. New tasks are filed into "To do", the column a product-backlog
+// item carries until it is planned into a sprint.
 export const DEFAULT_SCRUM_COLUMNS: BoardColumn[] = [
-  { key: "to_do", label: "To do", wipLimit: null, policy: "Pulled into the sprint, not yet started.", commitment: true, delivery: false },
-  { key: "in_progress", label: "In progress", wipLimit: 3, policy: "Actively being worked. One person, one card.", commitment: false, delivery: false },
-  { key: "review", label: "Review", wipLimit: 3, policy: "Awaiting review / verification.", commitment: false, delivery: false },
-  { key: "done", label: "Done", wipLimit: null, policy: "Meets the definition of done.", commitment: false, delivery: true },
+  { key: "to_do", label: "To do", wipLimit: null, policy: "Pulled into the sprint, not yet started.", commitment: true, delivery: false, allowCreate: true },
+  { key: "in_progress", label: "In progress", wipLimit: 3, policy: "Actively being worked. One person, one card.", commitment: false, delivery: false, allowCreate: false },
+  { key: "review", label: "Review", wipLimit: 3, policy: "Awaiting review / verification.", commitment: false, delivery: false, allowCreate: false },
+  { key: "done", label: "Done", wipLimit: null, policy: "Meets the definition of done.", commitment: false, delivery: true, allowCreate: false },
 ];
 
 const KEY_RE = /^[a-z0-9][a-z0-9_]*$/;
@@ -76,7 +81,7 @@ export function normalizeColumns(input: unknown): BoardColumn[] {
     if (commitment) commit++;
     if (delivery) deliver++;
     const limitScope: WipScope = c.limitScope === "assignee" ? "assignee" : "column";
-    return { key, label, wipLimit, limitScope, policy: String(c.policy ?? "").trim(), commitment, delivery };
+    return { key, label, wipLimit, limitScope, policy: String(c.policy ?? "").trim(), commitment, delivery, allowCreate: c.allowCreate === true };
   });
   if (commit > 1) throw new Error("only one column may be the commitment point");
   if (deliver > 1) throw new Error("only one column may be the delivery point");
@@ -146,6 +151,17 @@ export function derivePrefix(name: string): string {
 
 export function columnIndex(cols: BoardColumn[], key: string): number {
   return cols.findIndex((c) => c.key === key);
+}
+// The column a task filed without naming one lands in: the first that takes new tasks.
+export function entryColumn(cols: BoardColumn[]): BoardColumn | undefined {
+  return cols.find((c) => c.allowCreate);
+}
+// A board whose columns all refuse new tasks could never be given one, so saving that is refused. Checked on
+// create and configure, not in `normalizeColumns`: that also parses stored rows, and a stored board that fails
+// it would read as having no columns at all.
+export function requireEntryColumn(cols: BoardColumn[]): BoardColumn[] {
+  if (!entryColumn(cols)) throw new Error("at least one column must allow new tasks to be created in it");
+  return cols;
 }
 export function commitmentIndex(cols: BoardColumn[]): number {
   return cols.findIndex((c) => c.commitment);
