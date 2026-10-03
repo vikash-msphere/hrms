@@ -13,37 +13,23 @@ import { useCelebrationLeadDays } from "@/hooks/useCelebrations";
 import { AnniversaryOrbit, AnniversaryCaption } from "@/components/layout/AnniversaryOrbit";
 import { useTheme } from "@/lib/theme";
 import { lockPageScroll } from "@/lib/scrollLock";
-import { readLocal, writeLocal } from "@/lib/localPref";
+import { useNavPrefs } from "@/lib/navPrefs";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import type { Me } from "@/types";
 
 // Nav keys that are NOT a single collection (so no collection-scope access target on them).
 const NON_COLLECTION_KEYS = new Set(["dashboard", "profile", "documents"]);
 
-// Which sidebar groups the user has collapsed, persisted per user in localStorage (a pure UI preference,
-// so no server round-trip). Stored as the set of collapsed group labels.
-const collapseKey = (email: string) => `nav:collapsed:${email}`;
-function loadCollapsed(email: string): Set<string> {
-  try {
-    return new Set(JSON.parse(localStorage.getItem(collapseKey(email)) || "[]"));
-  } catch {
-    return new Set();
-  }
-}
-function saveCollapsed(email: string, set: Set<string>) {
-  try {
-    localStorage.setItem(collapseKey(email), JSON.stringify([...set]));
-  } catch {
-    /* ignore */
-  }
-}
-
-// Whether the whole sidebar is collapsed to an icon rail, a per-user preference (localStorage, pure UI).
-const railKey = (email: string) => `nav:rail:${email}`;
-// Guarded like its sibling writer: the Sidebar mounts in the app shell, so an unguarded read here took the
-// whole frame down (not one page) on a browser with site data blocked.
-const loadRail = (email: string) => readLocal(railKey(email)) === "1";
-const saveRail = (email: string, on: boolean) => writeLocal(railKey(email), on ? "1" : "0");
+// The icon rail and the full menu stack the same boxes at the same heights - brand row, one head slot per
+// group, 36px item rows - so expanding the rail (the toggle, or a hover peek) only adds labels and every icon
+// stays where the pointer left it. A group's head slot holds one hairline in both: the rail draws the line
+// alone, and the full menu writes the heading in front of the same line, so the rail's dividers turn into the
+// headings in place.
+const BRAND_ROW = "h-[68px]";
+const GROUP_HEAD = "h-6";
+// Tinted from the heading's own ink, not sidebar-border: that token is one neutral step off the sidebar
+// (neutral-200 on neutral-100), drawn to edge a panel, and as a 1px rule inside the panel it all but vanished.
+const GROUP_RULE = "h-px bg-sidebar-foreground/15";
 
 function Brand({ collapsed }: { collapsed?: boolean }) {
   const { org } = useOrg();
@@ -66,7 +52,9 @@ function Brand({ collapsed }: { collapsed?: boolean }) {
     celebrating && org.incorporation_date ? <AnniversaryCaption years={anniv!.years} incorporationDate={org.incorporation_date} placement={placement} /> : null;
   if (wordmark && !collapsed) {
     return (
-      <div className="relative min-w-0 flex-1 px-4 py-4">
+      // py-3, not the square mark's py-4: the wordmark is up to 44px tall, and 44 + 24 fills the brand row's
+      // fixed 68px (see BRAND_ROW) where py-4 would push the menu down 8px against the rail's square mark.
+      <div className="relative min-w-0 flex-1 px-4 py-3">
         {/* `isolate`: the orbit's comet swaps z-index to pass behind the image, inside this one context. */}
         <div className="relative isolate" title={annivTitle}>
           {/* w-full + object-contain: fills the sidebar width, height capped, never distorted whatever the
@@ -132,23 +120,26 @@ export function Sidebar({
     items: g.items.filter((i) => itemVisible(i, has, reachesOthers)),
   })).filter((g) => g.items.length > 0);
 
-  const [collapsed, setCollapsed] = useState<Set<string>>(() => loadCollapsed(me.email));
-  // The save is OUTSIDE the updater: a React updater must be pure, and StrictMode (web/src/main.tsx)
-  // deliberately invokes it twice, so a localStorage write in there happens twice per click.
+  // The folded groups and the manual rail choice, kept per user across browsers and devices (lib/navPrefs.ts).
+  const [navPrefs, updateNavPrefs] = useNavPrefs(me.email);
+  const collapsed = new Set(navPrefs.collapsed);
   const toggleGroup = (label: string) => {
-    const next = new Set(collapsed);
-    next.has(label) ? next.delete(label) : next.add(label);
-    setCollapsed(next);
-    saveCollapsed(me.email, next);
+    updateNavPrefs({ collapsed: collapsed.has(label) ? navPrefs.collapsed.filter((g) => g !== label) : [...navPrefs.collapsed, label] });
   };
+  // An item is "active" for the current route when it IS the route or owns it as a workspace tab.
+  const isActive = (i: (typeof groups)[number]["items"][number]) => i.key === current || !!i.tabs?.some((t) => t.key === current);
+  // Keep a group open if it holds the active page, even when the user collapsed it, so the current location is
+  // never hidden. Single-item groups (e.g. Admin) are never collapsible. The icon rail folds the same groups as
+  // the full menu, so the rail never shows an icon that opening the sidebar would then take away.
+  const collapsible = (g: (typeof groups)[number]) => g.items.length > 1;
+  const groupOpen = (g: (typeof groups)[number]) => !collapsible(g) || g.items.some(isActive) || !collapsed.has(g.label);
 
   // Whole-sidebar icon-rail collapse: the user's manual preference, OR auto when the sidebar is docked but the
   // viewport is narrow (md up to just below lg). Below md the sidebar is a full-width drawer, so the rail never
   // applies there. `rail` is the effective state; `toggleRail` only flips the manual preference.
   const docked = useMedia("(min-width: 768px)");
   const autoNarrow = useMedia("(min-width: 768px) and (max-width: 1023px)");
-  const [railPref, setRailPref] = useState(() => loadRail(me.email));
-  const rail = docked && (railPref || autoNarrow);
+  const rail = docked && (navPrefs.rail || autoNarrow);
   // Hovering the collapsed rail with a mouse opens the full menu as an overlay (`peek`), and leaving the
   // opened menu folds it back. The rail keeps its w-16 slot in the layout while it peeks, so the page never
   // reflows under the pointer. Mouse only: a tap on a touch screen fires pointerenter too, and must just
@@ -172,7 +163,7 @@ export function Sidebar({
   // otherwise the collapse would not show until the pointer left.
   const toggleRail = () => {
     setPeek(false);
-    setRailPref((v) => { const next = !v; saveRail(me.email, next); return next; });
+    updateNavPrefs({ rail: !navPrefs.rail });
   };
 
   // --- drawer behaviour (below md only) ---------------------------------------------------------------------
@@ -264,7 +255,7 @@ export function Sidebar({
           mobileOpen ? "translate-x-0" : "-translate-x-full"
         )}
       >
-        <div className={cn("flex items-center", iconsOnly ? "justify-center pt-1" : "justify-between")}>
+        <div className={cn(BRAND_ROW, "flex shrink-0 items-center", iconsOnly ? "justify-center" : "justify-between")}>
           <Brand collapsed={iconsOnly} />
           {/* Finger-sized close, and labelled: an unlabelled X is the most common unnamed control in a drawer. */}
           <button
@@ -280,7 +271,7 @@ export function Sidebar({
             the open drawer. The safe-area padding keeps the last item above the home indicator. */}
         <nav
           className={cn(
-            "flex-1 space-y-3 overflow-y-auto overscroll-contain pt-1",
+            "flex-1 space-y-2 overflow-y-auto overscroll-contain pt-1",
             "pb-[calc(0.75rem+env(safe-area-inset-bottom))]",
             iconsOnly ? "px-2" : "px-3",
             // The peek widens while the full menu is already drawn, so labels would wrap and a sideways
@@ -290,13 +281,17 @@ export function Sidebar({
         >
           {iconsOnly ? (
             // Icon rail: labels + group headers collapse to icons; the label (and unread count) live in a
-            // hover tooltip, and unread badges shrink to a corner dot. Groups are split by a thin divider.
+            // hover tooltip, and unread badges shrink to a corner dot. Each group opens on the hairline its
+            // heading is drawn on in the full menu (GROUP_HEAD); a folded group is that line alone.
             <TooltipProvider delayDuration={0}>
-              {groups.map((group, gi) => {
-                const isActive = (i: (typeof group.items)[number]) => i.key === current || !!i.tabs?.some((t) => t.key === current);
+              {groups.map((group) => {
                 return (
-                  <div key={group.label} className="space-y-1">
-                    {gi > 0 && <div className="mx-2 my-2 border-t border-sidebar-border/60" aria-hidden />}
+                  <div key={group.label}>
+                    <div className={cn(GROUP_HEAD, "flex items-center px-2")} aria-hidden>
+                      <span className={cn(GROUP_RULE, "w-full")} />
+                    </div>
+                    {groupOpen(group) && (
+                    <div className="space-y-1">
                     {group.items.map((item) => {
                       const active = isActive(item);
                       const Icon = item.icon;
@@ -310,7 +305,7 @@ export function Sidebar({
                               aria-current={active ? "page" : undefined}
                               aria-label={item.label}
                               className={cn(
-                                "relative flex h-10 items-center justify-center rounded-lg transition-colors",
+                                "relative flex h-9 items-center justify-center rounded-lg transition-colors",
                                 active ? "bg-sidebar-accent text-sidebar-accent-foreground shadow-sm" : "text-sidebar-foreground hover:bg-foreground/[0.06] hover:text-foreground",
                               )}
                             >
@@ -322,32 +317,30 @@ export function Sidebar({
                         </Tooltip>
                       );
                     })}
+                    </div>
+                    )}
                   </div>
                 );
               })}
             </TooltipProvider>
           ) : (
           groups.map((group) => {
-            // An item is "active" for the current route when it IS the route or owns it as a workspace tab.
-            const isActive = (i: (typeof group.items)[number]) => i.key === current || !!i.tabs?.some((t) => t.key === current);
-            // Keep a group open if it holds the active page, even when the user collapsed it, so the current
-            // location is never hidden. Single-item groups (e.g. Admin) are never collapsible.
-            const hasActive = group.items.some(isActive);
-            const collapsible = group.items.length > 1;
-            const isOpen = !collapsible || hasActive || !collapsed.has(group.label);
+            const isOpen = groupOpen(group);
             return (
             <div key={group.label}>
               <button
                 type="button"
-                onClick={() => collapsible && toggleGroup(group.label)}
+                onClick={() => collapsible(group) && toggleGroup(group.label)}
                 aria-expanded={isOpen}
                 className={cn(
-                  "flex w-full items-center justify-between rounded-md px-3 pb-1.5 pt-1 text-[11px] font-semibold uppercase tracking-wider text-sidebar-foreground/70 transition-colors",
-                  collapsible && "hover:text-sidebar-foreground",
+                  GROUP_HEAD,
+                  "flex w-full items-center gap-2 rounded-md px-3 text-[11px] font-semibold uppercase tracking-wider text-sidebar-foreground/70 transition-colors",
+                  collapsible(group) && "hover:text-sidebar-foreground",
                 )}
               >
                 {group.label}
-                {collapsible && (
+                <span className={cn(GROUP_RULE, "flex-1")} aria-hidden />
+                {collapsible(group) && (
                   <ChevronDown className={cn("h-3.5 w-3.5 transition-transform", !isOpen && "-rotate-90")} />
                 )}
               </button>
@@ -370,7 +363,7 @@ export function Sidebar({
                         onClick={onNavigate}
                         aria-current={active ? "page" : undefined}
                         className={cn(
-                          "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
+                          "flex h-9 items-center gap-3 rounded-lg px-3 text-sm font-medium transition-colors",
                           active
                             ? "bg-sidebar-accent text-sidebar-accent-foreground shadow-sm"
                             : "text-sidebar-foreground hover:bg-foreground/[0.06] hover:text-foreground"
