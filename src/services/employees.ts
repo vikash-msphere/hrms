@@ -8,7 +8,7 @@ import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, createdMeta, fieldDiff, stateMeta } from "../lib/audit";
+import { audit, auditUpdate, createdMeta, fieldDiff, stateMeta } from "../lib/audit";
 import { emitEvent } from "./eventBus";
 import { notify, notifyMany } from "./notifications";
 import { invalidArgument, failedPrecondition, notFound, aborted, isCodeCollision, isEmployeeNumberCollision } from "../lib/errors";
@@ -465,7 +465,7 @@ export async function updateEmployee(deps: Deps, actor: AppUser, id: string, pat
   const keys = Object.keys(set).filter((k) => k !== "updatedAt" && k !== "nationalIdEnc");
   const diff = fieldDiff(row, updated!, keys, "employees");
   const changedSensitive = "nationalIdEnc" in set;
-  await audit(deps, actor, "employee.update", "employees", id, Object.keys(diff).length || changedSensitive ? { diff, ...(changedSensitive ? { fields: ["national_id"] } : {}) } : undefined);
+  await auditUpdate(deps, actor, "employee.update", "employees", id, Object.keys(diff).length || changedSensitive ? { diff, ...(changedSensitive ? { fields: ["national_id"] } : {}) } : undefined);
   // A manager reassignment tells the employee who they now report to, and the new manager who joined their team.
   if (has("manager") && updated!.managerId !== row.managerId && updated!.managerId) {
     const empName = `${updated!.firstName} ${updated!.lastName}`.trim();
@@ -489,6 +489,6 @@ export async function setBio(deps: Deps, actor: AppUser, id: string, bio: string
   const v = (bio ?? "").trim();
   if (v.length > 280) throw invalidArgument("bio is too long (max 280 characters)");
   await deps.db.update(schema.employees).set({ bio: v || null, updatedAt: new Date() }).where(eq(schema.employees.uuid, id));
-  await audit(deps, actor, "employee.bio.update", "employees", id, { diff: { bio: { from: row.bio, to: v || null } } }, row);
+  await auditUpdate(deps, actor, "employee.bio.update", "employees", id, (row.bio ?? null) === (v || null) ? undefined : { diff: { bio: { from: row.bio, to: v || null } } }, row);
   return { bio: v || undefined };
 }

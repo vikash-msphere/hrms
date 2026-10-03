@@ -596,7 +596,7 @@ export default function LeaveCalendar({ me }: { me: Me }) {
                   <span className="h-3 w-3 rounded bg-violet-100 ring-1 ring-inset ring-violet-300 dark:bg-violet-950/40 dark:ring-violet-800" /> Holiday
                 </span>
                 <span className="flex items-center gap-1.5">
-                  <span className="h-3 w-3 rounded bg-brand-neutral-100 ring-1 ring-inset ring-brand-neutral-300 dark:bg-brand-neutral-800/40 dark:ring-brand-neutral-600" /> Non-working day
+                  <span className="h-3 w-3 rounded bg-brand-neutral-100 ring-1 ring-inset ring-brand-neutral-300 dark:bg-muted/50 dark:ring-brand-neutral-600" /> Non-working day
                 </span>
                 <span className="flex items-center gap-1.5">
                   <span className="h-1.5 w-6 rounded-full bg-warning" /> Cover strip: amber past 30% away, red past 50%

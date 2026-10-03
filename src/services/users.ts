@@ -6,7 +6,7 @@ import type { ListScope } from "../domain/access";
 import { applyScope } from "./listScope";
 import { keysetPage } from "./keysetPage";
 import type { AppUser } from "../env";
-import { audit, diffMeta } from "../lib/audit";
+import { audit, auditUpdate, diffMeta } from "../lib/audit";
 import { notFound, aborted, invalidArgument, isUserEmployeeCollision, oneOf } from "../lib/errors";
 import { etagOf } from "../http/serialize";
 import { EVERYONE_ROLE } from "../domain/grants";
@@ -157,6 +157,6 @@ export async function updateUser(deps: Deps, actor: AppUser, id: string, patch: 
     if (before.sort().join() !== [...after].sort().join()) Object.assign(meta, { diff: { ...(meta as { diff?: object }).diff, roles: { from: before.sort(), to: [...after].sort() } } });
   }
   // Only the fields whose value actually changed (from→to), not every field the form submitted.
-  await audit(deps, actor, "user.update", "users", id, Object.keys(meta).length ? meta : undefined, updated);
+  await auditUpdate(deps, actor, "user.update", "users", id, Object.keys(meta).length ? meta : undefined, updated);
   return updated;
 }

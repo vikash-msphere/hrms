@@ -33,7 +33,7 @@ beforeAll(async () => {
   deps = makeDeps(b);
 });
 
-const TABLES = [schema.cards, schema.boards, schema.assets, schema.accessRules, schema.reviews, schema.reviewCycles, schema.leaveRequests, schema.leaveTypes, schema.holidays, schema.announcements, schema.tickets, schema.users, schema.employees, schema.roles];
+const TABLES = [schema.cards, schema.boards, schema.assets, schema.accessRules, schema.reviews, schema.reviewCycles, schema.leaveRequests, schema.leaveTypes, schema.holidays, schema.announcements, schema.tickets, schema.users, schema.employees, schema.departments, schema.roles];
 beforeEach(async () => {
   for (const t of TABLES) await deps.db.delete(t); // the delete triggers clear the index with them
 });
@@ -794,6 +794,19 @@ describe("finding a record by its human id", () => {
     expect((await search(admin, "MS-13")).some((h) => h.collection === "cards")).toBe(false);
   });
 
+  it("narrows to tasks by the word the app calls them, as well as by their collection name", async () => {
+    const admin = await seedPerson("04-z01", "Root", "Admin", ADMIN_GRANT, "super_admin");
+    const id = await card(admin, "MS", 12, "Rotate the D1 credentials");
+    await ticketFor(admin, "04-z01-t1", "Rotate the office keys");
+    const scopes = await searchScopesFor(deps, admin);
+    for (const word of ["tasks", "task", "cards"]) {
+      const hits = await globalSearch(deps, admin, scopes, "rotate", redactionGateFor(admin), { collections: [word] });
+      expect(hits.map((h) => h.id), `in:${word}`).toEqual([id]);
+    }
+    const others = await globalSearch(deps, admin, scopes, "rotate", redactionGateFor(admin), { notCollections: ["tasks"] });
+    expect(kinds(others)).toEqual(["tickets"]);
+  });
+
   it("does not find a task by its key for somebody who may not list tasks", async () => {
     const admin = await seedPerson("04-z01", "Root", "Admin", ADMIN_GRANT, "super_admin");
     const alice = await seedPerson("04-a01", "Alice", "Kapoor", EMPLOYEE_GRANT);
@@ -897,5 +910,167 @@ describe("filters without words", () => {
     await leaveFor(admin, "04-z01-l1", "Dentist appointment");
     expect(await run(admin, {})).toEqual([]);
     expect(await run(admin, { collections: ["leave-requests"] }, "d")).toEqual([]);
+  });
+});
+
+describe("team, department, exclusion and order filters", () => {
+  const run = async (user: AppUser, q: string, narrowing: Parameters<typeof globalSearch>[5]) =>
+    globalSearch(deps, user, await searchScopesFor(deps, user), q, redactionGateFor(user), narrowing);
+  const titles = (hits: { title: string | null }[]) => hits.map((h) => h.title).sort();
+
+  async function departments() {
+    await deps.db.insert(schema.departments).values([
+      { uuid: genId(), code: "04", name: "Customer Success" },
+      { uuid: genId(), code: "04-q1", name: "Customer Success APAC" },
+      { uuid: genId(), code: "05", name: "Engineering" },
+    ]);
+  }
+
+  it("narrows to a department and the departments under it, by its name", async () => {
+    const admin = await seedPerson("04-z01", "Root", "Admin", ADMIN_GRANT, "super_admin");
+    await departments();
+    await ticketFor(admin, "04-z01-t1", "Laptop for support");
+    await ticketFor(admin, "04-q1-z01-t1", "Laptop for APAC support");
+    await ticketFor(admin, "05-z01-t1", "Laptop for builds");
+    await deps.db.insert(schema.holidays).values({ uuid: genId(), code: "h-lap", name: "Laptop amnesty day", date: new Date("2026-09-01") } as never);
+    const tickets = (hits: { collection: string; title: string | null }[]) => titles(hits.filter((h) => h.collection === "tickets"));
+    expect(tickets(await run(admin, "laptop", { dept: "customer-success" }))).toEqual(["Laptop for APAC support", "Laptop for support"]);
+    // The exact name wins over a longer one it starts: Customer Success APAC is under it anyway, and asked by
+    // its own name it is only itself.
+    expect(tickets(await run(admin, "laptop", { dept: "customer-success-apac" }))).toEqual(["Laptop for APAC support"]);
+    expect(tickets(await run(admin, "laptop", { dept: "eng" }))).toEqual(["Laptop for builds"]);
+    // A catalogue is filed under no department.
+    expect(kinds(await run(admin, "laptop", { dept: "engineering" }))).not.toContain("holidays");
+    // A word that names no department narrows to nothing, and so does a two-letter start.
+    expect(await run(admin, "laptop", { dept: "finance" })).toEqual([]);
+    expect(await run(admin, "laptop", { dept: "en" })).toEqual([]);
+    // With no words it lists the department's newest records.
+    expect(tickets(await run(admin, "", { dept: "engineering" }))).toEqual(["Laptop for builds"]);
+  });
+
+  it("names no department for a caller who may not list departments", async () => {
+    const alice = await seedPerson("04-a01", "Alice", "Kapoor", EMPLOYEE_GRANT);
+    await departments();
+    await leaveFor(alice, "04-a01-l1", "Dentist appointment");
+    expect(await run(alice, "dentist", {})).toHaveLength(1);
+    expect(await run(alice, "dentist", { dept: "customer-success" })).toEqual([]);
+  });
+
+  it("narrows to the records of the caller's direct reports", async () => {
+    const admin = await seedPerson("04-z01", "Root", "Admin", ADMIN_GRANT, "super_admin");
+    const report = await seedPerson("04-b01", "Bhavna", "Rao", EMPLOYEE_GRANT);
+    const other = await seedPerson("04-c01", "Chetan", "Iyer", EMPLOYEE_GRANT);
+    await deps.db.update(schema.employees).set({ managerId: admin.employeeId! }).where(eq(schema.employees.uuid, report.employeeId!));
+    await ticketFor(report, "04-b01-t1", "Parking pass lost");
+    await ticketFor(other, "04-c01-t1", "Parking pass renewal");
+    await ticketFor(admin, "04-z01-t1", "Parking pass for a guest");
+    expect(titles(await run(admin, "parking", { reportsOf: admin.employeeId! }))).toEqual(["Parking pass lost"]);
+    // Somebody nobody reports to has no team.
+    expect(await run(admin, "parking", { reportsOf: other.employeeId! })).toEqual([]);
+    expect(await run(admin, "parking", { reportsOf: "x'; drop table" })).toEqual([]);
+  });
+
+  it("does not answer a team question about a row whose owner the caller may not read", async () => {
+    const seeded = await seedPerson("04-z01", "Root", "Admin",
+      { levels: { "**": "admin" }, allow: ["**"], deny: ["tickets.*.employee_id.**"] } as Grant, "super_admin");
+    const admin = {
+      ...seeded,
+      policy: { ...DEFAULT_POLICY, redacted_fields: { ...DEFAULT_POLICY.redacted_fields, tickets: [...(DEFAULT_POLICY.redacted_fields.tickets ?? []), "employee_id"] } },
+    } as AppUser;
+    const report = await seedPerson("04-b01", "Bhavna", "Rao", EMPLOYEE_GRANT);
+    await deps.db.update(schema.employees).set({ managerId: admin.employeeId! }).where(eq(schema.employees.uuid, report.employeeId!));
+    await ticketFor(report, "04-b01-t1", "Parking pass lost");
+    expect(await run(admin, "parking", {})).toHaveLength(1);
+    expect(await run(admin, "parking", { reportsOf: admin.employeeId! })).toEqual([]);
+  });
+
+  it("leaves out the collections and the status asked to be left out", async () => {
+    const admin = await seedPerson("04-z01", "Root", "Admin", ADMIN_GRANT, "super_admin");
+    await ticketFor(admin, "04-z01-t1", "Diwali lights for the office");
+    await deps.db.insert(schema.holidays).values({ uuid: genId(), code: "h-diwali", name: "Diwali", date: new Date("2026-11-08") } as never);
+    expect(kinds(await run(admin, "diwali", {}))).toEqual(["holidays", "tickets"]);
+    expect(kinds(await run(admin, "diwali", { notCollections: ["holiday"] }))).toEqual(["tickets"]);
+
+    await leaveFor(admin, "04-z01-l1", "Dentist appointment");
+    await leaveFor(admin, "04-z01-l2", "Dentist follow up");
+    await deps.db.update(schema.leaveRequests).set({ state: "APPROVED" }).where(eq(schema.leaveRequests.code, "04-z01-l2"));
+    await deps.db.insert(schema.holidays).values({ uuid: genId(), code: "h-d", name: "Dentist day", date: new Date("2026-09-01") } as never);
+    // The pending request goes; the approved one stays, and so does the holiday, which has no status at all.
+    expect(titles(await run(admin, "dentist", { notStatuses: ["pending"] }))).toEqual(["Dentist day", "Dentist follow up"]);
+    // Several statuses: a row goes when any of them is its status.
+    expect(titles(await run(admin, "dentist", { notStatuses: ["pending", "approved"] }))).toEqual(["Dentist day"]);
+    expect(await run(admin, "dentist", { notStatuses: ["approved", "x'; drop table"] })).toEqual([]);
+  });
+
+  it("leaves out a person's, the team's and a department's records, and keeps what none of them speak about", async () => {
+    const admin = await seedPerson("05-z01", "Root", "Admin", ADMIN_GRANT, "super_admin");
+    await departments();
+    const report = await seedPerson("04-b01", "Bhavna", "Rao", EMPLOYEE_GRANT);
+    const other = await seedPerson("04-q1-c01", "Chetan", "Iyer", EMPLOYEE_GRANT);
+    await deps.db.update(schema.employees).set({ managerId: admin.employeeId! }).where(eq(schema.employees.uuid, report.employeeId!));
+    await ticketFor(report, "04-b01-t1", "Parking pass lost");
+    await ticketFor(other, "04-q1-c01-t1", "Parking pass renewal");
+    await ticketFor(admin, "05-z01-t1", "Parking pass for a guest");
+    await deps.db.insert(schema.holidays).values({ uuid: genId(), code: "h-park", name: "Parking day", date: new Date("2026-09-01") } as never);
+    const all = ["Parking day", "Parking pass for a guest", "Parking pass lost", "Parking pass renewal"];
+    expect(titles(await run(admin, "parking", {}))).toEqual(all);
+    // A catalogue row belongs to nobody and is filed nowhere, so every exclusion keeps it.
+    expect(titles(await run(admin, "parking", { notOwnerIds: [report.employeeId!] }))).toEqual(all.filter((t) => t !== "Parking pass lost"));
+    expect(titles(await run(admin, "parking", { notOwnerIds: [admin.employeeId!] }))).toEqual(all.filter((t) => t !== "Parking pass for a guest"));
+    expect(titles(await run(admin, "parking", { notReportsOf: admin.employeeId! }))).toEqual(all.filter((t) => t !== "Parking pass lost"));
+    // Customer Success and APAC under it go; Engineering and the catalogue stay.
+    expect(titles(await run(admin, "parking", { notDepts: ["customer-success"] }))).toEqual(["Parking day", "Parking pass for a guest"]);
+    // With the plain filter: Customer Success, but not its APAC team.
+    expect(titles(await run(admin, "parking", { dept: "customer-success", notDepts: ["customer-success-apac"] }))).toEqual(["Parking pass lost"]);
+    // An exclusion that names nothing leaves nothing out.
+    expect(titles(await run(admin, "parking", { notDepts: ["finance"] }))).toEqual(all);
+    // And alone, with no words, it lists.
+    expect(titles(await run(admin, "", { notDepts: ["customer-success"] }))).toContain("Parking pass for a guest");
+  });
+
+  it("takes several exclusions of one kind, and of every kind at once", async () => {
+    const admin = await seedPerson("05-z01", "Root", "Admin", ADMIN_GRANT, "super_admin");
+    await departments();
+    const bhavna = await seedPerson("04-b01", "Bhavna", "Rao", EMPLOYEE_GRANT);
+    const chetan = await seedPerson("04-q1-c01", "Chetan", "Iyer", EMPLOYEE_GRANT);
+    const dev = await seedPerson("05-d01", "Dev", "Shah", EMPLOYEE_GRANT);
+    await ticketFor(bhavna, "04-b01-t1", "Parking pass lost");
+    await ticketFor(chetan, "04-q1-c01-t1", "Parking pass renewal");
+    await ticketFor(dev, "05-d01-t1", "Parking pass for a van");
+    await ticketFor(admin, "05-z01-t1", "Parking pass for a guest");
+    await deps.db.insert(schema.holidays).values({ uuid: genId(), code: "h-park", name: "Parking day", date: new Date("2026-09-01") } as never);
+    // Two people, then two departments: each one named goes.
+    expect(titles(await run(admin, "parking", { notOwnerIds: [bhavna.employeeId!, dev.employeeId!] })))
+      .toEqual(["Parking day", "Parking pass for a guest", "Parking pass renewal"]);
+    expect(titles(await run(admin, "parking", { notDepts: ["customer-success-apac", "engineering"] })))
+      .toEqual(["Parking day", "Parking pass lost"]);
+    // Every kind together: not holidays, not Bhavna's, not Engineering - only Chetan's ticket is left.
+    expect(titles(await run(admin, "parking", { notCollections: ["holidays"], notOwnerIds: [bhavna.employeeId!], notDepts: ["engineering"] })))
+      .toEqual(["Parking pass renewal"]);
+  });
+
+  it("does not answer an exclusion about a row whose owner the caller may not read", async () => {
+    const seeded = await seedPerson("04-z01", "Root", "Admin",
+      { levels: { "**": "admin" }, allow: ["**"], deny: ["tickets.*.employee_id.**"] } as Grant, "super_admin");
+    const admin = {
+      ...seeded,
+      policy: { ...DEFAULT_POLICY, redacted_fields: { ...DEFAULT_POLICY.redacted_fields, tickets: [...(DEFAULT_POLICY.redacted_fields.tickets ?? []), "employee_id"] } },
+    } as AppUser;
+    const other = await seedPerson("04-b01", "Bhavna", "Rao", EMPLOYEE_GRANT);
+    await ticketFor(other, "04-b01-t1", "Parking pass lost");
+    expect(await run(admin, "parking", {})).toHaveLength(1);
+    // Kept by "not Bhavna's" would say whose it is not, which is the same probe the other way round.
+    expect(await run(admin, "parking", { notOwnerIds: [admin.employeeId!] })).toEqual([]);
+  });
+
+  it("orders newest first on sort:new, over the same matches", async () => {
+    const admin = await seedPerson("04-z01", "Root", "Admin", ADMIN_GRANT, "super_admin");
+    await deps.db.insert(schema.tickets).values([
+      { uuid: genId(), code: "04-z01-t1", employeeId: admin.employeeId!, subject: "Monitor flickers", createdAt: new Date("2026-01-10") },
+      { uuid: genId(), code: "04-z01-t2", employeeId: admin.employeeId!, subject: "Printer jammed", description: "the monitor cable is loose as well", createdAt: new Date("2026-03-10") },
+    ] as never);
+    const order = async (n: Parameters<typeof globalSearch>[5]) => (await run(admin, "monitor", n)).filter((h) => h.collection === "tickets").map((h) => h.title);
+    expect(await order({})).toEqual(["Monitor flickers", "Printer jammed"]);
+    expect(await order({ sort: "new" })).toEqual(["Printer jammed", "Monitor flickers"]);
   });
 });

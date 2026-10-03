@@ -37,6 +37,17 @@ describe("decodeWireIdsRequest", () => {
     expect(new URL(out.url).searchParams.get("employee")).toEqual(`employees/${EVE}`);
   });
 
+  it("decodes every value of a repeated query param, in order, beside the params around it", async () => {
+    const eve = await codec.encode("employees", EVE);
+    const other = DEPT; // any real id will do; only its being a second, different employee ref matters
+    const second = await codec.encode("employees", other);
+    const out = await decodeWireIdsRequest(req(`/v1/search?q=laptop&notowner=employees/${eve}&in=tickets&notowner=employees/${second}`), codec);
+    const q = new URL(out.url).searchParams;
+    expect(q.getAll("notowner")).toEqual([`employees/${EVE}`, `employees/${other}`]);
+    expect([...q.keys()]).toEqual(["q", "notowner", "in", "notowner"]);
+    expect(q.get("q")).toEqual("laptop");
+  });
+
   it("leaves non-ref query params untouched", async () => {
     const out = await decodeWireIdsRequest(req(`/v1/employees?show_deleted=true&max_page_size=20`), codec);
     const q = new URL(out.url).searchParams;

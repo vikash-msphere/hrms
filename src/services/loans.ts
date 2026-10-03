@@ -7,7 +7,7 @@ import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, createdMeta, diffMeta, stateMeta } from "../lib/audit";
+import { audit, auditUpdate, createdMeta, diffMeta, stateMeta } from "../lib/audit";
 import { notify, notifyManager } from "./notifications";
 import { emitEvent } from "./eventBus";
 import { invalidArgument, notFound, aborted, alreadyExists, failedPrecondition } from "../lib/errors";
@@ -86,7 +86,7 @@ export async function updateLoan(deps: Deps, actor: AppUser, id: string, patch: 
   if (has("reason")) set.reason = patch.reason?.trim() || null;
   if (has("start_date")) { if (patch.start_date && Number.isNaN(dayMs(patch.start_date))) throw invalidArgument("start_date is invalid"); set.startDate = patch.start_date ? new Date(dayMs(patch.start_date)) : null; }
   const updated = await updateAtVersion(deps, schema.loans, "loan", row, set);
-  await audit(deps, actor, "loan.update", "loans", id, diffMeta(row, updated, set, "loans"), updated);
+  await auditUpdate(deps, actor, "loan.update", "loans", id, diffMeta(row, updated, set, "loans"), updated);
   return updated;
 }
 

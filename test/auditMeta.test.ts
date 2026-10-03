@@ -2,7 +2,7 @@
 /// <reference types="@cloudflare/vitest-pool-workers" />
 import { env } from "cloudflare:test";
 import { describe, it, expect, beforeAll } from "vitest";
-import { createdMeta, removedMeta, stateMeta, fieldsMeta, rowValues, fieldDiff, diffMeta, audit } from "../src/lib/audit";
+import { createdMeta, removedMeta, stateMeta, fieldsMeta, rowValues, fieldDiff, diffMeta, audit, auditUpdate } from "../src/lib/audit";
 // Glob every migration (ordered by filename) so squashing/adding migrations never breaks this suite.
 const migrationModules = import.meta.glob("../src/db/migrations/*.sql", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
 const migrationSql = Object.keys(migrationModules).sort().map((k) => migrationModules[k]).join("\n");
@@ -147,6 +147,15 @@ describe("audit meta: what a create, a delete and a transition record", () => {
     expect(diffMeta({ actionsJson: "[1]" }, { actionsJson: "[1]" }, { actionsJson: "[1]" }, "automations")).toBeUndefined();
   });
 
+  // `auditUpdate` drops the row when diffMeta says nothing changed, so a change the diff may not SHOW must still
+  // count as a change, or an edit that moved only a secret would vanish from the trail. Named, never valued.
+  it("names a secret, encrypted or denied column that changed, and never its value", () => {
+    expect(diffMeta({ tagSecret: "a" }, { tagSecret: "b" }, { tagSecret: "b" }, "assets")).toEqual({ changed: ["tagSecret"] });
+    expect(diffMeta({ bankDetailsEnc: "x" }, { bankDetailsEnc: "y" }, { bankDetailsEnc: "y" }, "employees")).toEqual({ changed: ["bankDetails"] });
+    expect(diffMeta({ submitterId: "aa11bb22cc33d" }, { submitterId: "zz99yy88xx77w" }, { submitterId: "zz99yy88xx77w" }, "suggestions")).toEqual({ changed: ["submitterId"] });
+    expect(diffMeta({ tagSecret: "a" }, { tagSecret: "a" }, { tagSecret: "a" }, "assets")).toBeUndefined();
+  });
+
   // audit_log is read through a capability that knows nothing about a review's state, and the manager's
   // assessment is withheld from the employee until the review is SHARED. So none of it may be copied into an
   // entry - not the ratings blob (which is why `reviews` is not in DIFFABLE_BLOBS) and not the two plain
@@ -270,6 +279,17 @@ describe("audit lineage: one act, one trace", () => {
     const meta = JSON.parse((await entries("lineage.merged"))[0]!.meta!) as Record<string, unknown>;
     expect(meta.diff).toBeTruthy();
     expect(meta.via_automation).toBeTruthy();
+  });
+
+  // A save that changed nothing writes no row. It still marks the request as audited: the authz write backstop
+  // logs any write that wrote no row of its own, and would otherwise record the same no-op as a generic entry.
+  it("writes no update row when nothing changed, and keeps the write backstop from writing one instead", async () => {
+    const u = { ...actor, audited: false } as AppUser;
+    await auditUpdate(deps, u, "lineage.noop", "employees", "aa11bb22cc33d", undefined);
+    expect(await entries("lineage.noop")).toHaveLength(0);
+    expect(u.audited).toBe(true);
+    await auditUpdate(deps, u, "lineage.changed", "employees", "aa11bb22cc33d", { diff: { title: { from: "a", to: "b" } } });
+    expect(await entries("lineage.changed")).toHaveLength(1);
   });
 });
 

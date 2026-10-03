@@ -143,9 +143,10 @@ export function UserMenu({ me }: { me: Me }) {
           onValueChange={(v) => setTheme(v as Theme)}
           // The track. Inset from the menu's own padding so the control reads as one object rather than as
           // three rows that happen to sit in a line.
-          // `bg-background` + a border, NOT `bg-muted`: this control sits on a POPOVER, and `--muted` is the
-          // same neutral-800 as `--popover` in the dark palette, so a muted track is invisible there. The two
-          // tokens used here are a step apart in both palettes, and the border carries the edge either way.
+          // `bg-background` + a border, NOT `bg-muted`: this control sits on a POPOVER, and a muted track is
+          // only a hair off the popover in the dark palette (night-750 on night-800) and LIGHTER, so it reads
+          // raised rather than inset. Background sits below the popover in both palettes, and the border
+          // carries the edge either way.
           className="mx-1 mb-1 flex items-stretch gap-1 rounded-lg border bg-background p-1"
         >
           {THEMES.map((t) => (
@@ -160,7 +161,7 @@ export function UserMenu({ me }: { me: Me }) {
                 // The selection IS the raised segment. `data-[state=checked]` is Radix's own flag, so it
                 // tracks the group's value rather than a second copy of it kept in this file.
                 // `bg-card` sits one step LIGHTER than the track in both palettes (white on neutral-50,
-                // neutral-900 on neutral-950), so "raised" means the same thing in dark as in light - which a
+                // night-850 on night-900), so "raised" means the same thing in dark as in light - which a
                 // `bg-background` fill did not: it was darker than its own surroundings in the dark theme.
                 "data-[state=checked]:bg-card data-[state=checked]:text-foreground data-[state=checked]:shadow-sm",
               )}

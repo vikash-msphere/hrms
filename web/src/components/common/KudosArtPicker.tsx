@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Check, ImageOff } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
-import { ART_DIECUT_SM, KUDOS_ART_FILES, kudosArtFiles, kudosArtLabel, kudosArtUrl } from "@/lib/kudosArt";
+import { ART_DIECUT, KUDOS_ART_FILES, kudosArtFiles, kudosArtLabel, kudosArtUrl } from "@/lib/kudosArt";
 
 // Pick the stickers a kudos category offers (settings/kudos `art`). Multi-select: choosing that category while
 // writing a kudos puts one of them on the card, picked at random from the set, so a category's cards vary instead
@@ -45,7 +45,7 @@ export function KudosArtPicker({
           ) : (
             <>
               {selected.slice(0, MAX_PREVIEW).map((f) => (
-                <img key={f} src={kudosArtUrl(f)} alt="" aria-hidden className={cn("h-7 w-6 object-contain", ART_DIECUT_SM)} onError={(e) => { e.currentTarget.style.visibility = "hidden"; }} />
+                <img key={f} src={kudosArtUrl(f)} alt="" aria-hidden className={cn("h-7 w-6 object-contain", ART_DIECUT)} onError={(e) => { e.currentTarget.style.visibility = "hidden"; }} />
               ))}
               {selected.length > MAX_PREVIEW && <span className="text-[10px] tabular-nums text-muted-foreground">+{selected.length - MAX_PREVIEW}</span>}
             </>
@@ -73,7 +73,7 @@ export function KudosArtPicker({
                 aria-pressed={on}
                 className={cn("relative rounded-md border p-1 hover:bg-accent", on ? "border-primary ring-1 ring-primary" : "border-transparent")}
               >
-                <img src={kudosArtUrl(f)} alt={kudosArtLabel(f)} loading="lazy" className={cn("h-16 w-full object-contain", ART_DIECUT_SM)} />
+                <img src={kudosArtUrl(f)} alt={kudosArtLabel(f)} loading="lazy" className={cn("h-16 w-full object-contain", ART_DIECUT)} />
                 {on && (
                   <span className="absolute right-0.5 top-0.5 rounded-full bg-primary p-0.5 text-primary-foreground">
                     <Check className="h-2.5 w-2.5" />

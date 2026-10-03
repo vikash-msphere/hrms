@@ -38,6 +38,52 @@ test("a session that dies mid-form keeps the form", async ({ as }) => {
   await expect(page).toHaveURL(/\/vendors/);
 });
 
+// A request the dead session sent can be answered after the person is back: a background read or a preference
+// flush on a slow connection, landing after "I've signed in - continue" has already succeeded. That 401 is about
+// the session they replaced, so it must not put "Signed out" back over them, and the request it belonged to
+// still gets its answer (web/src/api.ts `staleRefusal`). Seen in a full run as the dialog reopening over the
+// chunk spec below, under the stack's injected API latency.
+test("a refusal that lands after signing back in does not sign the tab out again", async ({ as }) => {
+  const page = await as("super");
+  allowConsoleErrors(page, /401|Unauthorized|unauthenticated/i);
+  await gotoRoute(page, "vendors", "Vendors");
+
+  const saved = await page.context().cookies();
+  await page.context().clearCookies();
+
+  // The server really refuses this read (no cookie), and the answer is held until the person is back.
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  let held = false;
+  await page.route(/\/v1\/vendors\?max_page_size=1$/, async (route) => {
+    if (held) return route.continue();
+    held = true;
+    const response = await route.fetch();
+    await released;
+    await route.fulfill({ response });
+  });
+
+  // Through the app's own transport, as any page read goes. A string, so the test transform leaves `import()`
+  // to the browser, which resolves it to the module instance the app is already running.
+  const answer = page.evaluate(`import("/src/api.ts").then(({ api }) => {
+    const held = api("/vendors?max_page_size=1").then(() => "answered", (e) => "failed " + e.status);
+    // A second read that lapses at once - this one raises the dialog.
+    api("/vendors?max_page_size=2").catch(() => undefined);
+    return held;
+  })`);
+
+  const signedOut = page.getByText("Signed out", { exact: true });
+  await expect(signedOut).toBeVisible();
+  await page.context().addCookies(saved);
+  await page.getByRole("button", { name: "I've signed in - continue" }).click();
+  await expect(signedOut).toBeHidden();
+
+  release();
+  expect(await answer).toBe("answered");
+  await expect(signedOut).toBeHidden();
+  await expect(page.getByRole("heading", { level: 1, name: "Vendors" })).toBeVisible();
+});
+
 // The same lapse, met by a page's CODE rather than its data. In production the static-site gate
 // (src/http/staticSite.ts) refuses every chunk to a signed-out browser, and a refused dynamic import reports only
 // "failed to fetch" - exactly what a chunk deleted by a newer deploy reports. So the crash boundary used to say

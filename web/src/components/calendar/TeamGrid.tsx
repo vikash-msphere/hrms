@@ -72,7 +72,7 @@ export function TeamGrid({
   const dayTint = (ymd: string) =>
     closedOn(ymd) ? "bg-warning/15"
       : holidayOn(ymd) ? "bg-violet-100/60 dark:bg-violet-950/30"
-        : !workDays.includes(new Date(parseYmd(ymd)).getUTCDay()) ? "bg-brand-neutral-100/60 dark:bg-brand-neutral-800/30" : "";
+        : !workDays.includes(new Date(parseYmd(ymd)).getUTCDay()) ? "bg-brand-neutral-100/60 dark:bg-muted/50" : "";
 
   if (rows.length === 0) {
     return (

@@ -610,12 +610,16 @@ The index is maintained entirely by **triggers** (generated into the migration f
 `src/db/searchDdl.ts`; see section 12.2), never by a service - so there is no write path that could index a
 row the reader is not allowed to see, and no service to forget.
 
-The palette's narrowing (`?in=`, `?owner=employees/<id>`, `?mine=1`, `?after=`, `?before=`, `?status=` -
-typed as `in:tickets`, `@name`, `is:mine`, `after:2026-01`, `before:...`, `status:pending`) only ever ANDs
-another predicate onto those branches, so it can narrow a caller's answer and never widen it. `?owner` and
-`?status` are the two that ask a question about a column, so a hit whose owner or status column the caller's
-field gate withholds (`policy.redacted_fields`) is dropped from an answer narrowed by it: otherwise "is this
-row Priya's?" would be answerable by whether it comes back. A board task typed by its key (`MS-12`) is looked
+The palette's narrowing (`?in=`, `?owner=employees/<id>`, `?mine=1`, `?team=1`, `?dept=`, `?after=`, `?before=`,
+`?status=` - typed as `in:tickets`, `@name`, `is:mine`, `is:team`, `dept:sales`, `after:2026-01`, `before:...`,
+`status:pending` - and their `-` forms `?notin=`, `?notowner=`, `?notmine=1`, `?notteam=1`, `?notdept=`,
+`?notstatus=`, typed `-in:holidays`, `-@name`, `-is:mine`, `-is:team`, `-dept:sales`, `-status:rejected`) only
+ever ANDs another predicate onto those branches, or leaves a collection out of them, so it can narrow a caller's
+answer and never widen it. The owner filters (`?owner`, `?mine`, `?team` and their `not` forms), the status filters and `?dept`/`?notdept` ask a question about a
+column, so a hit whose owner, status or `department_id` column the caller's field gate withholds
+(`policy.redacted_fields`) is dropped from an answer narrowed by it: otherwise "is this row Priya's?" would be
+answerable by whether it comes back. `?dept` names only departments the caller's own `departments` list scope
+returns, so the word cannot confirm that a department they cannot see exists. A board task typed by its key (`MS-12`) is looked
 up by board prefix and number and then read under the same cards branch, so the key finds nothing the
 caller's list of tasks would not. The three verbs beside it, `search:feedback`, `search:ask` and
 `search:vocabulary`, read no record at all - one bumps a usage counter, one routes a question among the

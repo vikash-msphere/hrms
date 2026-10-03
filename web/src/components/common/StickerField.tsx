@@ -1,7 +1,7 @@
 import { Check, ImagePlus, Move, Scaling, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { IllustrationPicker, type PinnedArt } from "@/components/common/IllustrationPicker";
-import { isKudosSticker, kudosArtLabel, kudosCardArtUrl, ART_DIECUT_SM } from "@/lib/kudosArt";
+import { isKudosSticker, kudosArtLabel, kudosCardArtUrl, ART_DIECUT } from "@/lib/kudosArt";
 import { DEFAULT_WRAP, MAX_STICKER_SIZE, MIN_STICKER_SIZE, withWrap } from "@/components/common/CardSticker";
 import { FoldSection } from "@/components/common/FoldSection";
 import { WrapSelect } from "@/components/common/WrapSelect";
@@ -139,7 +139,7 @@ export function StickerField({
                     alt=""
                     aria-hidden
                     loading="lazy"
-                    className={cn("h-full w-full select-none object-contain", ART_DIECUT_SM)}
+                    className={cn("h-full w-full select-none object-contain", ART_DIECUT)}
                     onError={(e) => { e.currentTarget.style.visibility = "hidden"; }}
                   />
                   {on && (

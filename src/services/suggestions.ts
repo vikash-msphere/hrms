@@ -9,7 +9,7 @@ import { byIdChunks } from "../lib/dbBatch";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, createdMeta, diffMeta } from "../lib/audit";
+import { audit, auditUpdate, createdMeta, diffMeta } from "../lib/audit";
 import { notify, notifyMany } from "./notifications";
 import { holdsVerbForAnyone, roleHolderEmployeeIds } from "./capabilityHolders";
 import { emitEvent } from "./eventBus";
@@ -197,7 +197,7 @@ export async function updateSuggestion(deps: Deps, actor: AppUser, id: string, p
   const updated = await updateAtVersion(deps, schema.suggestions, "suggestion", row, set);
   // Same rule as the create: the submitter editing their own anonymous suggestion must not be named by the
   // trail either - an edit entry beside the create would give away exactly what the create no longer does.
-  await audit(deps, anonymousActor(actor, updated), "suggestion.update", "suggestions", id, diffMeta(row, updated, set, "suggestions"), updated);
+  await auditUpdate(deps, anonymousActor(actor, updated), "suggestion.update", "suggestions", id, diffMeta(row, updated, set, "suggestions"), updated);
   if (gated && !(await moderationGate(deps, "suggestions", id, actor.uuid))) return { ...updated, heldAt: set.heldAt as Date };
   return updated;
 }

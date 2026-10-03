@@ -6,7 +6,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, createdMeta, diffMeta, removedMeta } from "../lib/audit";
+import { audit, auditUpdate, createdMeta, diffMeta, removedMeta } from "../lib/audit";
 import { notFound, invalidArgument, failedPrecondition, alreadyExists } from "../lib/errors";
 import { clearCache } from "../lib/cache";
 import { generational } from "../lib/cacheGenerations";
@@ -86,7 +86,7 @@ export async function updateRole(deps: Deps, actor: AppUser, name: string, body:
     await deps.db.update(schema.roles).set(patch).where(eq(schema.roles.name, name));
   }
   const row = await getRole(deps, name);
-  await audit(deps, actor, "role.update", "roles", name, diffMeta(before, row, patch, "roles"), row);
+  await auditUpdate(deps, actor, "role.update", "roles", name, diffMeta(before, row, patch, "roles"), row);
   return row;
 }
 

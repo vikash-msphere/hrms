@@ -8,7 +8,7 @@ import { eq, and, inArray, type SQL } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, createdMeta, diffMeta } from "../lib/audit";
+import { audit, auditUpdate, createdMeta, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, forbidden, failedPrecondition, isDocumentAckDuplicate } from "../lib/errors";
 import { keysetPage } from "./keysetPage";
 import { searchFilter } from "./searchFilter";
@@ -220,7 +220,7 @@ export function makeDocumentService(cfg: Cfg) {
       if (has("requires_ack") && patch.requires_ack && !row.requiresAck) set.ackVersionTime = new Date();
     }
     const updated = await updateAtVersion(deps, table, singular, row as VersionedRow, set);
-    await audit(deps, actor, `${singular}.update`, collection, id, diffMeta(row, updated, set, collection), updated);
+    await auditUpdate(deps, actor, `${singular}.update`, collection, id, diffMeta(row, updated, set, collection), updated);
     return updated;
   }
 

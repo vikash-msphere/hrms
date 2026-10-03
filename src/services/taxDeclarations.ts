@@ -7,7 +7,7 @@ import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, createdMeta, diffMeta, stateMeta } from "../lib/audit";
+import { audit, auditUpdate, createdMeta, diffMeta, stateMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/errors";
 import { keysetPage } from "./keysetPage";
 import { etagOf } from "../http/serialize";
@@ -87,7 +87,7 @@ export async function updateTaxDeclaration(deps: Deps, actor: AppUser, id: strin
   if (has("declared_amount")) { if ((patch.declared_amount ?? 0) < 0) throw invalidArgument("declared_amount must be >= 0"); set.declaredAmount = patch.declared_amount ?? 0; }
   if (has("note")) set.note = patch.note?.trim() || null;
   const updated = await updateAtVersion(deps, schema.taxDeclarations, "declaration", row, set);
-  await audit(deps, actor, "tax-declaration.update", "tax-declarations", id, diffMeta(row, updated, set, "tax-declarations"), updated);
+  await auditUpdate(deps, actor, "tax-declaration.update", "tax-declarations", id, diffMeta(row, updated, set, "tax-declarations"), updated);
   return updated;
 }
 

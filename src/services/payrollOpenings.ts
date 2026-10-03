@@ -21,7 +21,7 @@ import { deleteStateFilter } from "./softDelete";
 import { CODE_WIDTH, allocOwnedCode, allocOwnedCodeRuns, withFreshCode } from "./codeAlloc";
 import { orgToday } from "./orgDay";
 import { finalizedRunTotals, fyWindow, monthKey } from "./taxProjection";
-import { audit, auditMany, createdMeta, diffMeta } from "../lib/audit";
+import { audit, auditMany, auditUpdate, createdMeta, diffMeta, type AuditEntry } from "../lib/audit";
 import { byIdChunks, chunk, runBatchChecked, type CheckedStmt } from "../lib/dbBatch";
 import { aborted, alreadyExists, invalidArgument, isPayrollOpeningDuplicate, notFound } from "../lib/errors";
 import { etagOf } from "../http/serialize";
@@ -190,7 +190,7 @@ export async function updatePayrollOpening(deps: Deps, actor: AppUser, id: strin
     throw e;
   }
   if (!updated) throw aborted("the record changed since it was read; re-read it and try again");
-  await audit(deps, actor, "payroll_opening.update", "payroll-openings", id, diffMeta(row, updated, set, "payroll-openings"), updated);
+  await auditUpdate(deps, actor, "payroll_opening.update", "payroll-openings", id, diffMeta(row, updated, set, "payroll-openings"), updated);
   return updated;
 }
 
@@ -357,12 +357,13 @@ async function writeOpenings(
   await auditMany(
     deps,
     actor,
-    landed.flatMap((p) => {
+    landed.flatMap((p): AuditEntry[] => {
       const row = byKey.get(`${p.employeeId}|${p.f.financialYear}`);
       if (!row) return [];
-      return p.prior
-        ? [{ action: "payroll_opening.update", entity: "payroll-openings", entityId: row.uuid, meta: diffMeta(p.prior, row, p.f, "payroll-openings"), snapshot: row }]
-        : [{ action: "payroll_opening.create", entity: "payroll-openings", entityId: row.uuid, meta: createdMeta(row, "payroll-openings"), snapshot: row }];
+      if (!p.prior) return [{ action: "payroll_opening.create", entity: "payroll-openings", entityId: row.uuid, meta: createdMeta(row, "payroll-openings"), snapshot: row }];
+      // A re-import of the same figures changed nothing, so it gets no entry (the same rule as auditUpdate).
+      const meta = diffMeta(p.prior, row, p.f, "payroll-openings");
+      return meta ? [{ action: "payroll_opening.update", entity: "payroll-openings", entityId: row.uuid, meta, snapshot: row }] : [];
     }),
   );
 }

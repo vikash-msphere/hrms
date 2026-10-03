@@ -14,6 +14,8 @@
 // per subset Google ships (cyrillic, greek, vietnamese, devanagari...) and Vite emits a file for every one of
 // them - a decorative face nobody picks would still cost megabytes in the deployed bundle. Same rule as the
 // Inter imports in index.css; widen the subset list in both places together.
+import type { CSSProperties } from "react";
+
 const FONT_LOADERS: Record<string, () => Promise<unknown>> = {
   geometric: () =>
     Promise.all([
@@ -114,6 +116,26 @@ export const NAME_FONTS: { value: string; label: string; stack: string }[] = [
   { value: "script", label: "Script", stack: 'Pacifico, "Snell Roundhand", "Brush Script MT", cursive' },
   { value: "mono", label: "Monospace", stack: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace' },
 ];
+
+// Two faces have strokes too thin for running text at a post's 14px: Comfortaa's 400 is a hairline and
+// Playfair's thin strokes break up, worst as light-on-dark text in the dark theme. As body copy they render one step
+// heavier. Bold markup is font-semibold (600), so it stays visibly heavier than either.
+const READING_WEIGHT: Record<string, number> = { rounded: 500, elegant: 500 };
+// Inter's x-height as a fraction of its em (1118 / 2048). `font-size-adjust` scales any other face so its
+// lowercase letters stand as tall as Inter's at the same font-size. Without it a face with short lowercase -
+// Georgia, Pacifico - sets a post body visibly smaller than the default face at the very same size setting.
+const INTER_X_HEIGHT = 0.546;
+
+/** How a post's chosen face renders as running text: the stack, plus the weight and size corrections that keep
+ *  it as readable as the UI font. `heading` skips the weight - a heading carries its own (font-semibold), and an
+ *  inline weight would override it. Undefined for the default face. Not for the wordmark, which is set large and
+ *  weighted by its own control. */
+export function readingFaceStyle(font: string | undefined, heading = false): CSSProperties | undefined {
+  const fontFamily = orgNameFontStack(font);
+  if (!fontFamily) return undefined;
+  const fontWeight = heading ? undefined : READING_WEIGHT[font!];
+  return { fontFamily, fontSizeAdjust: INTER_X_HEIGHT, ...(fontWeight ? { fontWeight } : null) };
+}
 
 /** The CSS font-family for a key, or undefined for "default" / anything unrecognised (inherit the UI font).
  *  Resolving a stack is the one funnel every face-rendering surface goes through (wordmark, board posts),

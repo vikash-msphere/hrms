@@ -780,7 +780,7 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
 
   const colBg = (i: number, d: Date) => {
     if (holByCol.get(i)) return "bg-violet-100/70 dark:bg-violet-950/30";
-    if (!workDays.includes(d.getUTCDay())) return "bg-brand-neutral-100/80 dark:bg-brand-neutral-800/40";
+    if (!workDays.includes(d.getUTCDay())) return "bg-brand-neutral-100/80 dark:bg-muted/50";
     return "";
   };
   // The half-aware overlay drawn inside a (relative) day cell - header and every row use it. While dragging it

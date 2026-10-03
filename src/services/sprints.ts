@@ -7,7 +7,7 @@ import type { AppUser } from "../env";
 import type { ListScope } from "../domain/access";
 import { applyScope } from "./listScope";
 import { keysetPage } from "./keysetPage";
-import { audit, createdMeta, diffMeta } from "../lib/audit";
+import { audit, auditUpdate, createdMeta, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/errors";
 import { etagOf } from "../http/serialize";
 import { deleteStateFilter, softDeleteRow, restoreRow, purgeRow, type PurgeCascade } from "./softDelete";
@@ -90,7 +90,7 @@ export async function updateSprint(deps: Deps, actor: AppUser, id: string, patch
   if (has("start_date")) set.startDate = dateOrNull(patch.start_date);
   if (has("end_date")) set.endDate = dateOrNull(patch.end_date);
   const updated = await updateAtVersion(deps, schema.sprints, "sprint", row, set);
-  await audit(deps, actor, "sprint.update", "sprints", id, diffMeta(row, updated, set, "sprints"), updated);
+  await auditUpdate(deps, actor, "sprint.update", "sprints", id, diffMeta(row, updated, set, "sprints"), updated);
   return updated;
 }
 

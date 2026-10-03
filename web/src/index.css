@@ -147,6 +147,7 @@
   --color-accent-foreground: hsl(var(--accent-foreground));
   --color-popover: hsl(var(--popover));
   --color-popover-foreground: hsl(var(--popover-foreground));
+  --color-overlay: hsl(var(--overlay) / var(--overlay-opacity));
   --color-card: hsl(var(--card));
   --color-card-foreground: hsl(var(--card-foreground));
   --color-sidebar: hsl(var(--sidebar));
@@ -229,7 +230,8 @@
 
      Ramps come from branding.json (Figma design tokens): a navy Brand Blue (anchored at 800, #15396D;
      the app carries the identity one step lighter at 700 - see --primary below),
-     an electric Brand Cyan anchored at 400 (#00F6FF), and a cool blue-biased Neutral ramp. Values are
+     an electric Brand Cyan anchored at 400 (#00F6FF), and a cool blue-biased Neutral ramp. The Night
+     ramp (dark-theme surfaces and text) is the app's own, explained where it is declared. Values are
      bare HSL triplets, not hex, so a hand-written rule can add its own alpha (`hsl(var(--primary) / 0.55)`).
      The Tailwind colour names wrap them as `hsl(var(--x))` in the `@theme inline` block above, and an
      opacity modifier (`bg-primary/90`, `text-foreground/70`) mixes that with transparent.
@@ -273,6 +275,24 @@
     --neutral-800: 215 26.8% 16.1%; /* #1E2734 */
     --neutral-900: 213 38.5% 10.2%; /* #101924 */
     --neutral-950: 217 68.9% 8.8%;  /* #071326 */
+
+    /* --- Primitive: Night (the dark theme's surfaces and text) ----------------------------------
+           Not from branding.json. The Neutral ramp's dark end is a saturated navy (#071326 at 69%), and a
+           whole page of it under near-white text reads as glare. These steps hold one muted slate hue
+           (223, about 20% saturation) and climb in lightness, so a surface that sits higher is lighter -
+           sidebar < page < card < popover - and the text is a soft grey rather than white. The card is
+           the anchor (#222734), because the card is where the app shows nearly everything that matters;
+           the page sits just below it so a card lifts off without glowing. Body text on a card is 12:1;
+           muted text holds 5:1 even on the muted fill. */
+    --night-100: 0 0% 90.2%;       /* #E6E6E6 - body text */
+    --night-400: 223 12% 68%;      /* #A4A9B7 - muted text */
+    --night-600: 223 12% 35.5%;    /* #505665 - inputs */
+    --night-700: 223 15% 27.2%;    /* #3B4150 - borders */
+    --night-750: 223 17% 23.2%;    /* #313745 - muted fill */
+    --night-800: 223 19% 20.2%;    /* #2A2F3D - popover */
+    --night-850: 223 21% 16.9%;    /* #222734 - card */
+    --night-900: 223 22% 14.7%;    /* #1D222E - page */
+    --night-950: 223 22% 12.4%;    /* #191D27 - sidebar */
 
     /* --- Status ramps. branding.json carries no red/green/amber, so these stay hand-tuned; they are
            written here (not inline) so they re-skin from the same place as everything else. --------- */
@@ -343,37 +363,47 @@
     --shadow-card-hover: 0 8px 24px -8px rgba(7, 19, 38, 0.2);
     --shadow-pop: 0 12px 32px -8px rgba(7, 19, 38, 0.18), 0 2px 6px -2px rgba(7, 19, 38, 0.09);
 
+    /* The scrim behind a dialog, a sheet or the mobile nav drawer (`bg-overlay`). Its own token, not
+       `bg-foreground/40`: the foreground is light in the dark theme, so a foreground scrim washed the
+       screen white there. The opacity travels with the colour because each theme needs its own. */
+    --overlay: var(--neutral-950);
+    --overlay-opacity: 0.4;
+
     /* One radius knob. The Tailwind scale derives every step from it and lands on the branding
        corner radii: md = 8, xl = 16, 2xl = 24, 3xl = 32 (see the `--radius-*` steps in @theme above). */
     --radius: 0.5rem;
   }
 
-  /* Dark mode re-points the SAME semantic names at different steps of the SAME ramps. No new colours. */
+  /* Dark mode re-points the SAME semantic names: neutrals onto the Night ramp, brand colours onto lighter
+     steps of the brand ramps. Every surface is its own step, so a border, a muted fill and a popover each
+     draw against whatever they sit on. */
   .dark {
-    --background: var(--neutral-950);
-    --foreground: var(--neutral-200);
+    --background: var(--night-900);
+    --foreground: var(--night-100);
 
-    --card: var(--neutral-900);
-    --card-foreground: var(--neutral-200);
+    --card: var(--night-850);
+    --card-foreground: var(--night-100);
 
-    --popover: var(--neutral-800);
-    --popover-foreground: var(--neutral-200);
+    --popover: var(--night-800);
+    --popover-foreground: var(--night-100);
 
-    /* Blue 800 disappears on a navy ground, so dark mode carries the identity at Blue 300. */
+    /* Blue 800 disappears on a dark ground, so dark mode carries the identity at Blue 300 (6.7:1 on a card). */
     --primary: var(--blue-300);
     --primary-foreground: var(--blue-950);
 
-    --secondary: var(--neutral-800);
-    --secondary-foreground: var(--neutral-200);
+    --secondary: var(--night-750);
+    --secondary-foreground: var(--night-100);
 
-    --muted: var(--neutral-800);
-    --muted-foreground: var(--neutral-400);
+    --muted: var(--night-750);
+    --muted-foreground: var(--night-400);
 
     --accent: var(--cyan-950);
     --accent-foreground: var(--cyan-300);
 
-    --destructive: 0 64% 56%;
-    --destructive-foreground: 0 0% 100%;
+    /* Light enough to read as text on a card (5.2:1) and on a popover, where a Delete menu item sits (4.6:1),
+       so a filled destructive control carries dark text, the same as success and warning below. */
+    --destructive: 0 80% 69%;
+    --destructive-foreground: 0 60% 10%;
 
     --success: 152 52% 46%;
     --success-foreground: 152 40% 8%;
@@ -381,17 +411,18 @@
     --warning: 35 88% 56%;
     --warning-foreground: 35 60% 10%;
 
-    --border: var(--neutral-800);
-    --input: var(--neutral-700);
+    --border: var(--night-700);
+    --input: var(--night-600);
     --ring: var(--blue-300);
 
-    --sidebar: var(--neutral-900);
-    --sidebar-foreground: var(--neutral-400);
-    /* Light blue, because a deep one would disappear into a neutral-900 sidebar - which is why the text on it
+    /* One step below the page, so the sidebar recedes as chrome the way the light theme's does. */
+    --sidebar: var(--night-950);
+    --sidebar-foreground: var(--night-400);
+    /* Light blue, because a deep one would disappear into a dark sidebar - which is why the text on it
        goes DARK here while the light theme's stays white. */
     --sidebar-accent: var(--blue-300);
     --sidebar-accent-foreground: var(--blue-950);
-    --sidebar-border: var(--neutral-800);
+    --sidebar-border: var(--night-800);
 
     /* Gradient starts lighter on the dark ground so it still carries the brand. */
     --brand-gradient: linear-gradient(120deg, hsl(var(--blue-800)), hsl(var(--blue-500)), hsl(var(--cyan-500)));
@@ -399,6 +430,10 @@
     --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 2px 8px -2px rgba(0, 0, 0, 0.45);
     --shadow-card-hover: 0 10px 28px -10px rgba(0, 0, 0, 0.6);
     --shadow-pop: 0 16px 40px -12px rgba(0, 0, 0, 0.7), 0 2px 8px -2px rgba(0, 0, 0, 0.5);
+
+    /* Black, and heavier than light's: dimming a ground that is already dark takes more of it. */
+    --overlay: 0 0% 0%;
+    --overlay-opacity: 0.6;
   }
 
   * {

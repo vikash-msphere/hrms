@@ -7,7 +7,7 @@ import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, createdMeta, diffMeta, noteMeta, stateMeta } from "../lib/audit";
+import { audit, auditUpdate, createdMeta, diffMeta, noteMeta, stateMeta } from "../lib/audit";
 import { byIdChunks, chunk, insertBatches, runBatch } from "../lib/dbBatch";
 import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/errors";
 import { etagOf } from "../http/serialize";
@@ -853,7 +853,7 @@ export async function updateGoal(deps: Deps, actor: AppUser, id: string, patch: 
   // a completed goal: closing one is a decision, and a corrected number should not undo it.
   if (set.progress === 100 && row.status !== "completed" && !has("status")) set.status = "completed";
   const updated = await updateAtVersion(deps, schema.goals, "goal", row, set);
-  await audit(deps, actor, "goal.update", "goals", id, diffMeta(row, updated, set, "goals"), updated);
+  await auditUpdate(deps, actor, "goal.update", "goals", id, diffMeta(row, updated, set, "goals"), updated);
   if (has("progress") || has("status") || set.progress != null) await emitGoalProgress(deps, actor, updated);
   // A key result that moved (or moved house) re-rolls the objective(s) it left and joined.
   if (updated.kind === "key_result") {

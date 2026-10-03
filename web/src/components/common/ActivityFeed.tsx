@@ -481,6 +481,16 @@ export function ActivityFeed({ resource, global = false, initialEntity, apiKey, 
     // Access-audit rows: a sensitive read names the field/sub-resource; a denial names the attempted path. Not
     // for a rule row: there the field is part of the rule, and the sentence above already reads it out.
     if (typeof m.field === "string" && m.field && !isRuleEvent) bits.push(<span key="f" className="text-muted-foreground">{fieldLabel(m.field)}</span>);
+    // Facts a service stamps in place of a diff, which were stored and then never shown, so the cell read as
+    // empty: the plain-language sentence on a row that is not a rule event (an access request), how a lifecycle
+    // step was reached, how many sign-ins it closed, the file slot an upload filled, a card re-ordered within its
+    // column, and the length of a comment whose text is deliberately not kept.
+    if (!isRuleEvent && typeof m.sentence === "string" && m.sentence) bits.push(<span key="snt" className="text-muted-foreground">{m.sentence}</span>);
+    if (typeof m.via === "string" && m.via) bits.push(<span key="via" className="text-muted-foreground">via {m.via.replace(/[-_]/g, " ")}</span>);
+    if (typeof m.users === "number" && m.users > 0) bits.push(<span key="usr" className="text-muted-foreground">{m.users} sign-in{m.users === 1 ? "" : "s"} closed</span>);
+    if (typeof m.slot === "string" && m.slot) bits.push(<span key="slt" className="text-muted-foreground">{fieldLabel(m.slot)}</span>);
+    if (m.reordered === true) bits.push(<span key="ro" className="text-muted-foreground">reordered in its column</span>);
+    if (typeof m.note_chars === "number" && m.note_chars > 0) bits.push(<span key="nc" className="text-muted-foreground">{m.note_chars} character{m.note_chars === 1 ? "" : "s"}</span>);
     // Raw request path: only for a denial / an unresolved (no-target) row — there the attempted path IS the
     // signal. For a normal mutation the action pill + resolved target already say it, so the path is pure noise.
     const showPath = a.action === "access.denied" || (!a.entity_name && !a.entity_ref);

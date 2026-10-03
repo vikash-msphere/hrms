@@ -104,6 +104,29 @@ export function localDay(ms: number, tz: string): string {
   return dayFormatter(tz).format(new Date(ms));
 }
 
+/** UTC offset of `tz` at the instant `at`, in ms (east of UTC is positive). */
+export function tzOffsetMs(tz: string, at: number): number {
+  // `hourCycle: "h23"` is load-bearing here, not tidiness. `hour12: false` leaves the hour cycle to the locale,
+  // and h24 renders midnight as `24:00:00` - which makes the string below `...T24:00:00Z`, which `Date.parse`
+  // answers NaN to. Naming the cycle keeps that off a runtime whose ICU resolves the other way.
+  const local = new Intl.DateTimeFormat("sv-SE", {
+    timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
+  }).format(new Date(at));
+  return Date.parse(`${local.replace(" ", "T")}Z`) - at;
+}
+
+/**
+ * The INSTANT an org-local calendar day "YYYY-MM-DD" begins in `tz` - for comparing a day against a moment that
+ * happened (`created_at`, a punch). NOT for a date-only column, which stores the day at UTC midnight (see
+ * services/orgDay.ts dayStartMs). The offset is read twice so a day that starts just after a DST change lands
+ * on the offset in force at its own midnight, not the one before it.
+ */
+export function localDayStartMs(ymd: string, tz: string): number {
+  const midnightZ = Date.parse(`${ymd}T00:00:00Z`);
+  const guess = midnightZ - tzOffsetMs(tz, midnightZ);
+  return midnightZ - tzOffsetMs(tz, guess);
+}
+
 // Calendar day "YYYY-MM-DD" of a DATE-ONLY column.
 //
 // Every date-only column in the schema is anchored at UTC midnight (`period_start`, `holidays.date`,

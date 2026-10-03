@@ -2,7 +2,7 @@ import { and, eq } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, fieldDiff } from "../lib/audit";
+import { audit, auditUpdate, fieldDiff } from "../lib/audit";
 import { AppError, aborted, invalidArgument, isSettingKeyCollision, notFound } from "../lib/errors";
 import { etagOf } from "../http/serialize";
 import { paginate } from "../http/pagination";
@@ -123,7 +123,7 @@ export async function upsertSetting(deps: Deps, actor: AppUser, key: string, val
     // must see the new value, not the snapshot taken before it.
     bustRef(deps, "settings");
     const diff = settingDiff(existing.value, json);
-    await audit(deps, actor, "setting.update", "settings", key, diff ? { diff } : undefined);
+    await auditUpdate(deps, actor, "setting.update", "settings", key, diff ? { diff } : undefined);
     return updated!;
   }
   // An If-Match on a key that has no row at all is a caller editing a version that is gone (the key was

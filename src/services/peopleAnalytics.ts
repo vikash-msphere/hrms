@@ -10,7 +10,7 @@ import type { Deps } from "../deps";
 import { invalidArgument } from "../lib/errors";
 import { chunk } from "../lib/dbBatch";
 import { photoMarker } from "../http/serialize";
-import { localDay, type AttendanceConfig } from "../domain/attendance";
+import { localDay, tzOffsetMs, type AttendanceConfig } from "../domain/attendance";
 import { orgScheduleOf } from "../domain/workSchedule";
 import { scheduleCtxWith } from "./workSchedule";
 import { excusalsByDay, judgeDay, type LateEarlyKind } from "../domain/punctuality";
@@ -105,20 +105,6 @@ export type AnalyticsResult = {
   /** Present only when ONE employee was asked for with `series`: their day-by-day attendance. */
   series?: AttendanceSeriesDay[];
 };
-
-/** UTC offset of `tz` at `at`, in ms. The report buckets punches into org-local days with one offset for the
- *  whole window (the alternative is a timezone database in SQL); a zone that changes offset mid-window can
- *  therefore misfile a punch within an hour of local midnight on the changeover day. */
-function tzOffsetMs(tz: string, at: number): number {
-  // `hourCycle: "h23"` is load-bearing here, not tidiness. `hour12: false` leaves the hour cycle to the locale,
-  // and h24 renders midnight as `24:00:00` - which makes the string below `...T24:00:00Z`, which `Date.parse`
-  // answers NaN to. The offset is then NaN and every day bucket in the report is built from it. Naming the
-  // cycle keeps that off a runtime whose ICU resolves the other way.
-  const local = new Intl.DateTimeFormat("sv-SE", {
-    timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
-  }).format(new Date(at));
-  return Date.parse(`${local.replace(" ", "T")}Z`) - at;
-}
 
 // The calendar day a DATE-ONLY column names. Every such column in the schema is anchored at UTC midnight, so
 // this is read in UTC and nowhere else - see domain/attendance.ts#utcDay, which states the rule.
@@ -233,6 +219,8 @@ export async function peopleAnalytics(deps: Deps, scopes: Map<string, ListScope>
   const toDate = new Date(to);
   const toExclusiveDate = new Date(toExclusive);
   const today = new Date(parseYmd(todayYmd));
+  // One offset for the whole window (the alternative is a timezone database in SQL), so a zone that changes
+  // offset mid-window can misfile a punch within an hour of local midnight on the changeover day.
   const offsetMs = tzOffsetMs(sched.timezone, from + (to - from) / 2);
   // The org-local day a punch belongs to, as a day number (local midnight / a day of ms).
   const dayNo = sql<number>`((${t.attendanceSessions.clockIn} + ${offsetMs}) / 86400000)`;

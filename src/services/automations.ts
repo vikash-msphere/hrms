@@ -7,7 +7,7 @@ import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, createdMeta, removedMeta, diffMeta } from "../lib/audit";
+import { audit, auditUpdate, createdMeta, removedMeta, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted, forbidden, failedPrecondition } from "../lib/errors";
 import { isSuperGrant } from "../domain/grants";
 import { applyScope } from "./listScope";
@@ -171,7 +171,7 @@ export async function updateAutomation(deps: Deps, actor: AppUser, id: string, p
     set.lastScheduledOn = null;
   }
   const updated = await updateAtVersion(deps, schema.automations, "automation", row, set);
-  await audit(deps, actor, "automation.update", "automations", id, diffMeta(row, updated, set, "automations"), updated);
+  await auditUpdate(deps, actor, "automation.update", "automations", id, diffMeta(row, updated, set, "automations"), updated);
   invalidateAutomationCache();
   return updated;
 }

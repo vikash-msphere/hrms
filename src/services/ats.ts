@@ -13,7 +13,7 @@ import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, createdMeta, diffMeta, stateMeta } from "../lib/audit";
+import { audit, auditUpdate, createdMeta, diffMeta, stateMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted, failedPrecondition, oneOf } from "../lib/errors";
 import { etagOf } from "../http/serialize";
 import { idFromPath } from "./documentsCommon";
@@ -140,7 +140,7 @@ export async function updateRequisition(deps: Deps, actor: AppUser, id: string, 
     if ((s === "closed" || s === "filled") && !row.closedDate && patch.closed_date === undefined) set.closedDate = deps.clock.now();
   }
   const updated = await updateAtVersion(deps, schema.jobRequisitions, "requisition", row, set);
-  await audit(deps, actor, "requisition.update", "job-requisitions", id, diffMeta(row, updated, set, "job-requisitions"), updated);
+  await auditUpdate(deps, actor, "requisition.update", "job-requisitions", id, diffMeta(row, updated, set, "job-requisitions"), updated);
   return updated;
 }
 
@@ -215,7 +215,7 @@ export async function updateCandidate(deps: Deps, actor: AppUser, id: string, pa
   if (patch.tags !== undefined) set.tags = patch.tags?.trim() || null;
   if (patch.notes !== undefined) set.notes = patch.notes?.trim() || null;
   const updated = await updateAtVersion(deps, schema.candidates, "candidate", row, set);
-  await audit(deps, actor, "candidate.update", "candidates", id, diffMeta(row, updated, set, "candidates"), updated);
+  await auditUpdate(deps, actor, "candidate.update", "candidates", id, diffMeta(row, updated, set, "candidates"), updated);
   return updated;
 }
 
@@ -409,7 +409,7 @@ export async function updateApplication(deps: Deps, actor: AppUser, id: string, 
   if (patch.applied_date !== undefined) set.appliedDate = patch.applied_date ? parseDate(patch.applied_date, "applied_date") : null;
   if (patch.status !== undefined && patch.status === "withdrawn") set.status = "withdrawn";
   const updated = await updateAtVersion(deps, schema.applications, "application", row, set);
-  await audit(deps, actor, "application.update", "applications", id, diffMeta(row, updated, set, "applications"), updated);
+  await auditUpdate(deps, actor, "application.update", "applications", id, diffMeta(row, updated, set, "applications"), updated);
   return updated;
 }
 
@@ -558,7 +558,7 @@ export async function updateInterview(deps: Deps, actor: AppUser, id: string, pa
   if (patch.interviewers !== undefined) set.interviewerIds = interviewersJson(patch.interviewers);
   if (patch.location !== undefined) set.location = patch.location?.trim() || null;
   const updated = await updateAtVersion(deps, schema.interviews, "interview", row, set);
-  await audit(deps, actor, "interview.update", "interviews", id, diffMeta(row, updated, set, "interviews"), updated);
+  await auditUpdate(deps, actor, "interview.update", "interviews", id, diffMeta(row, updated, set, "interviews"), updated);
   // A reschedule notifies every interviewer; a changed panel notifies only the newly-added interviewers.
   const timeChanged = set.scheduledStart !== undefined && +new Date(row.scheduledStart ?? 0) !== +new Date(updated.scheduledStart ?? 0);
   const current = parseIdList(updated.interviewerIds);
@@ -718,7 +718,7 @@ export async function updateInterviewFeedback(deps: Deps, actor: AppUser, id: st
   if (patch.recommendation !== undefined) set.recommendation = patch.recommendation ? oneOf(patch.recommendation, RECOMMENDATIONS, "invalid recommendation") : null;
   if (patch.comment !== undefined) set.comment = patch.comment?.trim() || null;
   const updated = await updateAtVersion(deps, schema.interviewFeedback, "scorecard", row, set);
-  await audit(deps, actor, "interview-feedback.update", "interview-feedback", id, diffMeta(row, updated, set, "interview-feedback"), updated);
+  await auditUpdate(deps, actor, "interview-feedback.update", "interview-feedback", id, diffMeta(row, updated, set, "interview-feedback"), updated);
   return updated;
 }
 
@@ -789,7 +789,7 @@ export async function updateOffer(deps: Deps, actor: AppUser, id: string, patch:
   if (patch.expiry_date !== undefined) set.expiryDate = patch.expiry_date ? parseDate(patch.expiry_date, "expiry_date") : null;
   if (patch.notes !== undefined) set.notes = patch.notes?.trim() || null;
   const updated = await updateAtVersion(deps, schema.offers, "offer", row, set);
-  await audit(deps, actor, "offer.update", "offers", id, diffMeta(row, updated, set, "offers"), updated);
+  await auditUpdate(deps, actor, "offer.update", "offers", id, diffMeta(row, updated, set, "offers"), updated);
   return updated;
 }
 

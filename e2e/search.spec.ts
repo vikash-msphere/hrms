@@ -208,6 +208,18 @@ test.describe("global search", () => {
       await expect(row.first()).toBeVisible();
       await search.fill(`before:${lastYear}-01 ${reason}`);
       await expect(row).toHaveCount(0);
+      // Relative days count back from the org's today, and on: is that one day.
+      await search.fill(`after:7d ${reason}`);
+      await expect(row.first()).toBeVisible();
+      await search.fill(`on:today ${reason}`);
+      await expect(row.first()).toBeVisible();
+      await search.fill(`on:yesterday ${reason}`);
+      await expect(row).toHaveCount(0);
+      // An exclusion leaves out exactly what the plain filter keeps.
+      await search.fill(`-status:pending ${reason}`);
+      await expect(row).toHaveCount(0);
+      await search.fill(`-in:holidays ${reason}`);
+      await expect(row.first()).toBeVisible();
       // Filters with no words list the newest records they name. Not necessarily THIS one: the employee fixture
       // is shared, and other workers file pending leave as the same person while this runs, so the newest few can
       // all be theirs. That the query answers with records at all is the claim; the words above pinned ours.
@@ -243,5 +255,33 @@ test.describe("global search", () => {
     // A word typed out in full offers nothing, so Enter is left to open a result.
     await search.pressSequentially("is:mine");
     await expect(filters).toHaveCount(0);
+  });
+
+  test("? lists every filter, and taking one hands over to its own completions", async ({ as }) => {
+    const employee = await as("employee");
+    await gotoRoute(employee, "dashboard");
+    await employee.keyboard.press("ControlOrMeta+k");
+    const search = employee.getByPlaceholder("Search people, records, pages and settings…");
+    const filters = employee.getByRole("group", { name: "Filters" });
+
+    // The hint bar's "all filters" opens the same guide typing `?` does.
+    await employee.getByRole("button", { name: "? all filters" }).click();
+    await expect(search).toHaveValue("?");
+    await expect(search).toBeFocused();
+    // Leaving out is one rule, first in the list, and each filter that has a - form shows it.
+    await expect(filters.getByRole("option").first()).toContainText("put - in front of it");
+    await expect(filters.getByRole("option").filter({ hasText: "leave out with -status:rejected" })).toBeVisible();
+
+    // Taking the rule leaves a lone -, which offers the filters it turns round.
+    await filters.getByRole("option").first().click();
+    await expect(search).toHaveValue("-");
+    await expect(filters.getByRole("option").filter({ hasText: "-is:mine" })).toBeVisible();
+    await search.fill("?");
+
+    // Picking a key leaves it open, with the caret after it, so its values are offered next.
+    // By its example: hasText is a substring, and "Records in one status" is inside "Leave out records in one status".
+    await filters.getByRole("option").filter({ hasText: "status:pending" }).click();
+    await expect(search).toHaveValue("status:");
+    await expect(filters.getByRole("option").filter({ hasText: "status:pending" }).first()).toBeVisible();
   });
 });

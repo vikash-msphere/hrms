@@ -6,67 +6,9 @@ import { SETTINGS_REGISTRY } from "@/settings/registry";
 import { pageKeyForCollection, settingsPanelForCollection } from "@/lib/resourceRoute";
 import { FileText, type LucideIcon } from "lucide-react";
 
-// Collections whose wire name isn't the user-facing word. Everything else is de-kebabed and sentence-cased.
-const ENTITY_LABEL: Record<string, string> = {
-  cards: "Tasks",
-  attendance: "Attendance",
-  "check-ins": "1:1s",
-  "org-documents": "Company documents",
-  "personal-documents": "My documents",
-  automations: "Workflows",
-};
-// Irregular singulars (the default just drops a trailing "s").
-const ENTITY_SINGULAR: Record<string, string> = {
-  cards: "Task",
-  attendance: "Attendance",
-  "check-ins": "1:1",
-  "org-documents": "Company document",
-  "personal-documents": "Document",
-  automations: "Workflow",
-  "background-checks": "Background check",
-  holidays: "Holiday",
-  expenses: "Expense",
-  "expense-categories": "Expense category",
-  "asset-categories": "Asset category",
-  "asset-requests": "Asset request",
-  "reimbursement-categories": "Reimbursement category",
-  "compliance-events": "Compliance event",
-  "compliance-rules": "Compliance rule",
-  "notice-periods": "Notice period",
-  "transition-tasks": "Onboarding task",
-  transitions: "Transition",
-  "review-cycles": "Review cycle",
-  "review-feedback": "Feedback",
-  "interview-feedback": "Scorecard",
-  "job-requisitions": "Job",
-  "salary-structures": "Salary structure",
-  "pay-periods": "Pay period",
-  "pay-components": "Pay component",
-  "pay-grades": "Pay grade",
-  "ticket-checklists": "Ticket checklist",
-  "shift-assignments": "Shift assignment",
-  "work-patterns": "Schedule",
-  "work-pattern-assignments": "Schedule assignment",
-  "approval-delegations": "Delegation",
-  "benefit-plans": "Benefit plan",
-  "benefit-enrollments": "Enrolment",
-  "expense-budgets": "Budget",
-  "attendance-regularizations": "Attendance correction",
-};
-
-const sentence = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
-
-/** Plural, user-facing name of a collection — for type filters and group headings. */
-export function entityLabel(collection: string): string {
-  return ENTITY_LABEL[collection] ?? sentence(collection.replace(/-/g, " "));
-}
-
-/** Singular, user-facing name of one record — for the type badge on a search hit. */
-export function entityLabelSingular(collection: string): string {
-  if (ENTITY_SINGULAR[collection]) return ENTITY_SINGULAR[collection];
-  const plural = entityLabel(collection);
-  return plural.endsWith("ies") ? `${plural.slice(0, -3)}y` : plural.endsWith("s") ? plural.slice(0, -1) : plural;
-}
+// The words live in src/domain/entityNames.ts, shared with the server, so that a name shown here is one the
+// ⌘K `in:` filter accepts.
+export { entityLabel, entityLabelSingular } from "../../../src/domain/entityNames";
 
 // ---- Tones -------------------------------------------------------------------------------------------------
 // One tone per broad area of the app, plus the three non-record result types. Class strings are written out in

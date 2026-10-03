@@ -61,7 +61,7 @@ import { CARD_CAPS, TILE_CAPS, ACTION_CAPS } from "@/lib/statRows";
 import { TeamTimeline } from "@/components/common/TeamTimeline";
 import { PunctualityPulse } from "@/components/common/PunctualityPulse";
 import { PhotoAvatar } from "@/components/common/PhotoAvatar";
-import { kudosCardArtUrl, ART_DIECUT_SM } from "@/lib/kudosArt";
+import { kudosCardArtUrl, ART_DIECUT } from "@/lib/kudosArt";
 import { AccessTarget } from "@/components/access/AccessTarget";
 import type { AccessTargetRef } from "@/components/access/AccessModeProvider";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -1733,7 +1733,7 @@ export default function Dashboard({ me }: { me: Me }) {
                         alt=""
                         aria-hidden
                         loading="lazy"
-                        className={cn("h-10 w-10 shrink-0 self-center object-contain", ART_DIECUT_SM)}
+                        className={cn("h-10 w-10 shrink-0 self-center object-contain", ART_DIECUT)}
                         onError={(e) => { e.currentTarget.style.display = "none"; }}
                       />
                     )}

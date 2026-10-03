@@ -9,6 +9,7 @@ import { jsonBody } from "../http/jsonRequest";
 import { askSearch } from "../services/searchAsk";
 import { MAX_DESTINATIONS, MAX_QUESTION } from "../domain/searchAsk";
 import { startOfPeriod } from "../domain/searchQuery";
+import { orgTimezone } from "../services/orgDay";
 
 // Virtual collection: `GET /v1/search?q=...` returns cross-collection hits for the command palette. `search`
 // is not a resource - it holds no data of its own and grants nothing. It is the read-side twin of
@@ -20,39 +21,75 @@ import { startOfPeriod } from "../domain/searchQuery";
 // `name` is the standard `<collection>/<id>` resource ref, so the outbound wire edge tokenizes the id like
 // every other response and the SPA routes on it with the same resourceRoute() it uses for the activity feed.
 //
-// NARROWING (the palette's `in:`, `@name` and `is:mine`), all of which only ever narrow the caller's own scopes:
+// NARROWING (the palette's filter words), all of which only ever narrow the caller's own scopes:
 //   ?in=tickets,assets     only these collections
+//   ?notin=holidays        not these collections
 //   ?owner=employees/<id>  only rows belonging to this employee - decoded inbound like any query-param ref
 //   ?mine=1                only rows belonging to the caller
-//   ?after=2026-01[-15]    only rows created on or after the start of that month (or day), UTC
-//   ?before=2026-03[-01]   only rows created before the start of that month (or day), UTC
+//   ?team=1                only rows belonging to the caller's direct reports
+//   ?dept=sales            only rows filed under the departments that word names
+//   ?after=2026-01[-15]    only rows created on or after the start of that month (or day), in the org timezone
+//   ?before=2026-03[-01]   only rows created before the start of that month (or day), in the org timezone
 //   ?status=pending        only rows whose own state/status column holds that value
+//   ?notstatus=rejected,cancelled
+//                          not rows whose own state/status column holds any of those values
+//   ?notowner=employees/<a>&notowner=employees/<b>, ?notmine=1, ?notteam=1, ?notdept=sales,hr
+//                          the owner, team and department filters turned round: not those rows. The people
+//                          are a REPEATED param, not a comma list, because each ref is decoded inbound as a
+//                          whole value (middleware/decodeWireIds.ts).
 // With any of these and an empty `q`, the answer is the newest rows the narrowing names, not nothing.
+//   ?sort=new              newest first instead of by relevance (an order, not a narrowing)
 export const search = new Hono<AppEnv>().get("/", async (c) => {
   const user = c.get("user")!;
   const q = c.req.query("q") ?? "";
-  const collections = (c.req.query("in") ?? "").split(",").map((s) => s.trim()).filter(Boolean).slice(0, 12);
-  const ownerRef = c.req.query("owner");
+  const list = (name: string) => (c.req.query(name) ?? "").split(",").map((s) => s.trim()).filter(Boolean).slice(0, 12);
+  const collections = list("in");
+  const notCollections = list("notin");
+  const refId = (ref: string | undefined) => (ref?.startsWith("employees/") ? ref.split("/").pop() : undefined);
   // A caller with no employee record owns nothing, so `mine` for them matches nothing rather than everything.
-  const ownerId = c.req.query("mine") === "1" ? (user.employeeId ?? "-") : ownerRef?.startsWith("employees/") ? ownerRef.split("/").pop() : undefined;
+  const ownerId = c.req.query("mine") === "1" ? (user.employeeId ?? "-") : refId(c.req.query("owner"));
+  // `notmine` is the caller leaving themselves out, so it joins the people left out rather than replacing them.
+  const notOwnerIds = [
+    ...(c.req.query("notmine") === "1" ? [user.employeeId ?? "-"] : []),
+    ...(c.req.queries("notowner") ?? []).flatMap((ref) => refId(ref) ?? []),
+  ].slice(0, 12);
+  // ...and nobody reports to them, so `team` matches nothing too ("-" is no employee id).
+  const reportsOf = c.req.query("team") === "1" ? (user.employeeId ?? "-") : undefined;
+  const notReportsOf = c.req.query("notteam") === "1" ? (user.employeeId ?? "-") : undefined;
+  const dept = c.req.query("dept");
+  const notDepts = list("notdept");
   const after = c.req.query("after");
   const before = c.req.query("before");
   const status = c.req.query("status");
-  const afterMs = after === undefined ? undefined : startOfPeriod(after);
-  const beforeMs = before === undefined ? undefined : startOfPeriod(before);
+  const notStatuses = list("notstatus");
+  // Days are the org's, the same days the palette counts `today` and `7d` in. One cached settings read, and
+  // only for a dated search.
+  const tz = after !== undefined || before !== undefined ? await orgTimezone(c.get("deps")) : "UTC";
+  const afterMs = after === undefined ? undefined : startOfPeriod(after, tz);
+  const beforeMs = before === undefined ? undefined : startOfPeriod(before, tz);
   // A date that does not parse narrows to nothing rather than being dropped, so the answer is never WIDER
   // than the question asked.
   const unparsable = afterMs === null || beforeMs === null;
   const hits = unparsable ? [] : await globalSearch(c.get("deps"), user, c.get("searchScopes") ?? new Map(), q, redactionGateFor(user), {
     collections: collections.length ? collections : undefined,
+    notCollections: notCollections.length ? notCollections : undefined,
     ownerId,
+    notOwnerIds: notOwnerIds.length ? notOwnerIds : undefined,
+    reportsOf,
+    notReportsOf,
+    dept,
+    notDepts: notDepts.length ? notDepts : undefined,
     after: afterMs ?? undefined,
     before: beforeMs ?? undefined,
     status,
+    notStatuses: notStatuses.length ? notStatuses : undefined,
+    sort: c.req.query("sort") === "new" ? "new" : undefined,
   });
   // A query that found nothing at all is the evidence for a missing synonym or noun. Unnarrowed only: a
   // search scoped to one collection finding nothing says nothing about the vocabulary. Off the response path.
-  const narrowed = collections.length > 0 || !!ownerId || after !== undefined || before !== undefined || status !== undefined;
+  const narrowed = collections.length > 0 || notCollections.length > 0 || !!ownerId || notOwnerIds.length > 0 || !!reportsOf
+    || !!notReportsOf || dept !== undefined || notDepts.length > 0
+    || after !== undefined || before !== undefined || status !== undefined || notStatuses.length > 0;
   if (hits.length === 0 && !narrowed) {
     const work = recordInsight(c.get("deps"), "zero", zeroLabel(q));
     try {

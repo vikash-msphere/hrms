@@ -42,18 +42,16 @@ const MAX_LEVELS = 4; // a fifth row would make the strip taller than the story;
 const RUG = 12; // px - the tick strip everybody lands on
 const LIST_CAP = 6;
 // Zone tints. Dark mode lifts the late/severe ones a step: at the light theme's strength amber and red are a
-// barely-there brown on the near-black strip. Grace stays the muted surface in both.
+// barely-there brown on the dark strip. Grace stays the muted surface in both.
 const ZONE = {
   grace: "bg-muted",
   late: "bg-warning/10 dark:bg-warning/[0.18]",
   severe: "bg-destructive/10 dark:bg-destructive/[0.22]",
 };
-// Popover edge. In dark mode `--border` and `--popover` are the same step (neutral-800), so the stock border
-// draws nothing; a faint foreground hairline gives the card an edge without a new colour.
 // A not-yet-punched person's avatar. Less faded on dark: at the light theme's 60% a desaturated avatar on a
-// near-black ground is all but gone, so it keeps more of itself there.
+// dark ground is all but gone, so it keeps more of itself there.
 const GHOST = "opacity-60 grayscale dark:opacity-80";
-const TIP_CLASS ="rounded-lg border bg-popover px-2.5 py-2 text-popover-foreground shadow-lg dark:border-foreground/10";
+const TIP_CLASS ="rounded-lg border bg-popover px-2.5 py-2 text-popover-foreground shadow-lg";
 
 type Verdict = "late" | "severe" | "excused" | "pending";
 type Person = { id: string; name: string; photo?: string };
