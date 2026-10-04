@@ -9,7 +9,7 @@ import * as schema from "../src/db/schema";
 import type { Bindings, AppUser } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
-import { createBoard, configureBoard, boardMetrics } from "../src/services/boards";
+import { createBoard, configureBoard, boardMetrics, updateBoard } from "../src/services/boards";
 import { createCard, updateCard, moveCard, deleteCard, setCardBlocked, commentCard, getCardWithComments, addCardTodos, toggleCardTodo, removeCardTodo, promoteCardTodo, listCards } from "../src/services/cards";
 import { createGoal } from "../src/services/goals";
 import { createSprint, activateSprint, completeSprint } from "../src/services/sprints";
@@ -385,6 +385,19 @@ describe("kanban flow: WIP + timestamps + movements + goal roll-up", () => {
     const o1 = await createCard(deps, actor, { board: `boards/${other.uuid}`, title: "X" });
     expect(o1.seq).toBe(1);
     expect(o1.keyPrefix).toBe("PT");
+  });
+
+  it("keeps a task key prefix to letters and digits, starting with a letter", async () => {
+    const actor = await seedActor();
+    expect((await createBoard(deps, actor, { name: "Site", task_prefix: "ms-site" })).taskPrefix).toBe("MSSITE");
+    await expect(createBoard(deps, actor, { name: "Digits", task_prefix: "2x" })).rejects.toThrow(/start with a letter/);
+    // A name that starts with a number derives a prefix without it.
+    const board = await createBoard(deps, actor, { name: "2026 Roadmap" });
+    expect(board.taskPrefix).toBe("R");
+    // A board stored with a digit-led prefix keeps it through a save that resends it, and can't be moved to another.
+    await deps.db.update(schema.boards).set({ taskPrefix: "2X" }).where(eq(schema.boards.uuid, board.uuid));
+    expect((await updateBoard(deps, actor, board.uuid, { name: "Roadmap", task_prefix: "2X" })).taskPrefix).toBe("2X");
+    await expect(updateBoard(deps, actor, board.uuid, { task_prefix: "3Y" })).rejects.toThrow(/start with a letter/);
   });
 
   it("blocks a task by another task (dependency link)", async () => {

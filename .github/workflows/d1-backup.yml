@@ -8,7 +8,7 @@ name: d1-backup
 # for the seconds between the snapshot and the upload, and the runner is discarded after the job.
 on:
   schedule:
-    - cron: "30 20 * * *" # 20:30 UTC = 02:00 IST, when nobody is clocking in or approving
+    - cron: "7 22 * * *" # 22:07 UTC = 03:37 IST, when nobody is clocking in or approving
   workflow_dispatch: {}
 
 concurrency:
@@ -50,7 +50,7 @@ jobs:
           STAMP="$(date -u +%F)"
           echo "STAMP=$STAMP" >> "$GITHUB_ENV"
           node --import ./scripts/tsResolve.mjs scripts/d1Backup.ts --out "hrms-$STAMP.sql.gz"
-      # The one copy: the existing DOCS bucket, under a backups/ prefix. r2-backup.yml leaves that prefix out
-      # of its copy to hrms-backup, and retention is an R2 lifecycle rule on `backups/`.
+      # The one copy: the hrms-backup bucket, under db/, apart from the documents r2-backup.yml copies in as
+      # <collection>/<id>. Retention is an R2 lifecycle rule on the `db/` prefix of hrms-backup.
       - name: Upload snapshot to R2
-        run: npx wrangler r2 object put "hrms/backups/db/hrms-${STAMP}.sql.gz" --file="hrms-${STAMP}.sql.gz" --content-type application/gzip --remote
+        run: npx wrangler r2 object put "hrms-backup/db/hrms-${STAMP}.sql.gz" --file="hrms-${STAMP}.sql.gz" --content-type application/gzip --remote

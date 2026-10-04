@@ -7,11 +7,10 @@ import { useApprovals } from "@/lib/approvals";
 import { useNotifications } from "@/lib/notifications";
 import { cn } from "@/lib/utils";
 import { AccessTarget } from "@/components/access/AccessTarget";
-import { useOrg, orgAnniversary, orgNameFontStack, orgNameWeight, orgNameSizePx } from "@/lib/org";
+import { useOrg, useOrgLogos, orgAnniversary, orgNameFontStack, orgNameWeight, orgNameSizePx } from "@/lib/org";
 import { useMedia } from "@/hooks/useMedia";
 import { useCelebrationLeadDays } from "@/hooks/useCelebrations";
 import { AnniversaryOrbit, AnniversaryCaption } from "@/components/layout/AnniversaryOrbit";
-import { useTheme } from "@/lib/theme";
 import { lockPageScroll } from "@/lib/scrollLock";
 import { useNavPrefs } from "@/lib/navPrefs";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -33,14 +32,9 @@ const GROUP_RULE = "h-px bg-sidebar-foreground/15";
 
 function Brand({ collapsed }: { collapsed?: boolean }) {
   const { org } = useOrg();
-  // Dark-theme logo variant, when the org uploaded one. Picked here rather than with CSS because the logo is an
-  // <img> data URL: that SVG is an isolated document, so neither our `.dark` class nor its own
-  // prefers-color-scheme rules (those follow the OS) track the in-app theme.
-  const { resolved } = useTheme();
-  const logo = (resolved === "dark" ? org.logo_dark : undefined) || org.logo;
   // A wordmark (logo + name drawn as one wide image) replaces the square-mark-plus-text pair and spans the
   // sidebar's width. It can't shrink into the w-16 icon rail, so the rail keeps using the square mark.
-  const wordmark = (resolved === "dark" ? org.wordmark_dark : undefined) || org.wordmark;
+  const { logo, wordmark } = useOrgLogos();
   // While the incorporation anniversary is inside the org's celebration lead time - i.e. exactly when it's
   // counted in the Celebrations StatCard - the mark goes into orbit (AnniversaryOrbit.tsx). The mark itself
   // stays the org's upload; the orbit and caption are drawn round it.

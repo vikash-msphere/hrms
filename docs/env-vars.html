@@ -1322,7 +1322,7 @@ wrangler vectorize create-metadata-index hrms-search --property-name=collection 
               <code>CLOUDFLARE_API_TOKEN</code>. Create it under R2 &rarr; Manage R2 API Tokens, Object Read
               &amp; Write, scoped to <code>hrms</code> and <code>hrms-backup</code>.</p>
             <p class="risk"><b>Only <code>r2-backup.yml</code> uses these,</b> and it fails loudly when they are
-              missing. Without the weekly sync, documents have exactly one copy &mdash; and an e-signed letter
+              missing. Without the daily sync, documents have exactly one copy &mdash; and an e-signed letter
               is the one thing nothing else can rebuild.</p>
           </div>
         </label>

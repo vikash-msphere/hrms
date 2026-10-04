@@ -3,6 +3,7 @@ import { get } from "@/api";
 import { APP_NAME } from "./brand";
 import { formatMoney } from "./utils";
 import { getSetting } from "@/lib/settingsStore";
+import { useTheme } from "@/lib/theme";
 import { decimalsFor } from "../../../src/domain/currency";
 
 // Organization branding (name + logo), stored as a single `settings/organization` JSON row (logo is a small
@@ -31,7 +32,7 @@ export type LetterDefaults = {
 // lib/quickActions.ts (normalizeQuickMenu / resolveQuickMenu).
 // `logo_dark` is the optional dark-theme variant of `logo`. Both are data URLs rendered in an <img>, and an
 // <img>-embedded SVG cannot see the app's `.dark` class (nor can `prefers-color-scheme` inside it, which
-// follows the OS, not the in-app theme) - so the swap happens in React, at the call site. Unset = use `logo`.
+// follows the OS, not the in-app theme) - so the swap happens in React, in useOrgLogos. Unset = use `logo`.
 // `wordmark`/`wordmark_dark` are the wide logo-plus-name artwork. When set, the sidebar renders it across its
 // full width INSTEAD of the square `logo` + the name text (name_font/weight/size then style nothing). The
 // collapsed icon rail still shows `logo`, since a wordmark can't fit it.
@@ -140,6 +141,21 @@ export function OrgProvider({ children }: { children: React.ReactNode }) {
 }
 
 export const useOrg = () => useContext(Ctx);
+
+// The org's square mark and wordmark for the in-app theme: the dark variant when the theme is dark and one was
+// uploaded, else the light one. Picked here rather than with CSS because the logo is an <img> data URL: that SVG
+// is an isolated document, so neither our `.dark` class nor its own prefers-color-scheme rules (those follow the
+// OS) track the in-app theme. Every on-screen logo goes through this; printed output (asset tags, letters) keeps
+// the light `logo`, since it lands on white paper.
+export function useOrgLogos(): { logo?: string; wordmark?: string } {
+  const { org } = useOrg();
+  const { resolved } = useTheme();
+  const dark = resolved === "dark";
+  return {
+    logo: (dark ? org.logo_dark : undefined) || org.logo,
+    wordmark: (dark ? org.wordmark_dark : undefined) || org.wordmark,
+  };
+}
 
 // The one money formatter for the app: resolves the currency's configured display precision (currencyDecimals)
 // so every screen renders the same digits (INR in whole rupees by default). Pass a currency code to override

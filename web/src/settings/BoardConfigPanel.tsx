@@ -19,6 +19,7 @@ import { useConfirm } from "@/components/common/confirm";
 import { useDeletedToast } from "@/hooks/useSoftDelete";
 import { useUnsaved } from "@/components/common/UnsavedChanges";
 import { BoardSharingTab } from "./BoardSharingTab";
+import { cleanPrefix, prefixError } from "../../../src/domain/boards";
 
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "col";
 
@@ -114,8 +115,15 @@ function BoardConfigForm({ board, onClose, onSaved }: { board: Board; onClose?: 
   );
   // The server refuses a board no task could ever be created on; saying so here names the control to change.
   const noEntry = !cols.some((c) => c.allowCreate);
+  // A prefix the board already has is kept as it is, even one saved before prefixes had to start with a letter.
+  const typedPrefix = cleanPrefix(prefix);
+  const prefixErr = typedPrefix !== board.task_prefix ? prefixError(typedPrefix) : null;
   async function save() {
     if (!name.trim()) return;
+    if (prefixErr) {
+      toast({ title: "Couldn't save", description: `The task key prefix ${prefixErr}.`, variant: "destructive" });
+      return;
+    }
     if (noEntry) {
       toast({ title: "Couldn't save", description: "Tick \"New tasks can be created here\" on at least one column.", variant: "destructive" });
       return;
@@ -160,11 +168,10 @@ function BoardConfigForm({ board, onClose, onSaved }: { board: Board; onClose?: 
     };
     // Name/description are a plain PATCH (do it first, while the etag is fresh); the structural config goes
     // through the :configure verb (which doesn't gate on the etag).
-    const cleanPrefix = prefix.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
-    const detailsChanged = name.trim() !== board.name || description.trim() !== (board.description ?? "") || boardMode !== board.mode || cleanPrefix !== board.task_prefix;
+    const detailsChanged = name.trim() !== board.name || description.trim() !== (board.description ?? "") || boardMode !== board.mode || typedPrefix !== board.task_prefix;
     try {
       if (detailsChanged) {
-        await patch(`boards/${idOf(board.path)}`, { name: name.trim(), description: description.trim() || null, task_prefix: cleanPrefix, mode: boardMode }, board.etag);
+        await patch(`boards/${idOf(board.path)}`, { name: name.trim(), description: description.trim() || null, task_prefix: typedPrefix, mode: boardMode }, board.etag);
       }
       await invoke(`boards/${idOf(board.path)}`, "configure", undefined, {
         columns,
@@ -219,7 +226,11 @@ function BoardConfigForm({ board, onClose, onSaved }: { board: Board; onClose?: 
             </Select>
           </Field>
           <Field label="Name"><Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Board name" /></Field>
-          <Field label="Task key prefix" hint="Used for task keys like MS-12. New tasks only; existing keys don't change.">
+          <Field
+            label="Task key prefix"
+            hint="Letters and digits only, starting with a letter. Used for task keys like MS-12. New tasks only; existing keys don't change."
+            error={prefixErr ? `The prefix ${prefixErr}.` : undefined}
+          >
             <Input value={prefix} onChange={(e) => setPrefix(e.target.value)} placeholder="MS" className="w-40 uppercase" maxLength={6} />
           </Field>
           <Field label="Description"><Textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={2} /></Field>

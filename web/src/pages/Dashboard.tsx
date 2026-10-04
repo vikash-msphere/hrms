@@ -73,7 +73,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { resolveDashboardShortcuts } from "@/lib/dashboardShortcuts";
 import { AccessAction } from "@/components/access/AccessAction";
-import { useOrg, currencyDecimals, orgAnniversary } from "@/lib/org";
+import { useOrg, useOrgLogos, currencyDecimals, orgAnniversary } from "@/lib/org";
 import { getSetting } from "@/lib/settingsStore";
 
 
@@ -649,6 +649,7 @@ export default function Dashboard({ me }: { me: Me }) {
   // feed (but NOT merged into `celebrations`, so the timeline is left untouched). Shown within the same lead
   // time as the rest and sorted in by proximity.
   const orgAnniv = useMemo(() => orgAnniversary(org.incorporation_date), [org.incorporation_date]);
+  const { logo: orgLogo } = useOrgLogos();
   const celebAll = useMemo(() => {
     const rows = celebrations.map((c) => ({ org: false as const, in_days: c.in_days, c }));
     const merged: ({ org: false; in_days: number; c: Celebration } | { org: true; in_days: number; years: number })[] = [...rows];
@@ -1647,8 +1648,9 @@ export default function Dashboard({ me }: { me: Me }) {
                   {celebRows.map((row) =>
                     row.org ? (
                       <div key="org-anniversary" className="flex items-center gap-3">
-                        <div className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full border bg-muted">
-                          {org.logo ? <img src={org.logo} alt="" className="h-full w-full object-cover" /> : <PartyPopper className="h-4 w-4 text-success" />}
+                        {/* The muted fill backs only the fallback icon: under a logo (often a transparent PNG/SVG) it greys the artwork out. */}
+                        <div className={cn("flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full border-[0.5px]", !orgLogo && "bg-muted")}>
+                          {orgLogo ? <img src={orgLogo} alt="" className="h-full w-full object-cover" /> : <PartyPopper className="h-4 w-4 text-success" />}
                         </div>
                         <div className="min-w-0 flex-1">
                           <p className="truncate text-sm font-medium">{org.name}</p>

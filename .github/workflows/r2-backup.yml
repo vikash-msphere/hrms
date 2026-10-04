@@ -1,5 +1,5 @@
 name: r2-backup
-# Weekly copy of the R2 document bucket into a SEPARATE bucket.
+# Daily copy of the R2 document bucket into a SEPARATE bucket.
 #
 # WHY THIS EXISTS. D1 is recoverable two ways (Time Travel for 7 days on Workers Free / 30 on Paid, plus the
 # nightly d1-backup.yml snapshot).
@@ -25,16 +25,15 @@ name: r2-backup
 #      Neither the deploy nor the d1-backup workflow uses these, and this workflow uses nothing else.
 #   4. Optionally add a lifecycle rule on `hrms-backup` to expire objects after your retention period.
 #
-# WHAT IS NOT COPIED. `backups/` - the nightly D1 dumps d1-backup.yml writes into the live bucket. They are a
-# backup already, and they are not documents: the copy to hrms-backup is for what cannot be rebuilt. Their
-# retention is a lifecycle rule on the `backups/` prefix of `hrms`.
+# WHAT IS NOT COPIED. `backups/` of the live bucket, which holds only D1 dumps from before d1-backup.yml wrote
+# straight into `db/` of hrms-backup. Their retention is a lifecycle rule on the `db/` prefix of `hrms-backup`.
 #
 # NOTE ON ENCRYPTION. Document bodies in R2 are encrypted under FIELD_ENCRYPTION_KEY, so this copy is only as
 # recoverable as that key. Escrow the key somewhere outside Cloudflare, or the backup restores nothing.
 # See docs/deploy.md "Backups & disaster recovery".
 on:
   schedule:
-    - cron: "0 4 * * 0" # Sundays 04:00 UTC, hours after the nightly D1 snapshot (20:30 UTC) has finished
+    - cron: "53 21 * * *" # 21:53 UTC = 03:23 IST daily
   workflow_dispatch: {}
 
 concurrency:
@@ -51,7 +50,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     steps:
-      # `aws s3 sync` is incremental (size + mtime), so a week of unchanged documents transfers nothing and
+      # `aws s3 sync` is incremental (size + mtime), so a day of unchanged documents transfers nothing and
       # only new or modified objects move. `--delete` is deliberately NOT passed: a document deleted in the
       # app must stay in the backup, which is the entire point of having one.
       - name: Sync hrms -> hrms-backup

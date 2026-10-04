@@ -136,17 +136,32 @@ export function parseColumns(json: string | null | undefined): BoardColumn[] {
   }
 }
 
-// Task-key prefix: uppercase alphanumerics only, 1-6 chars (e.g. "ms-site" -> "MSSITE"). Empty allowed.
-export function normalizePrefix(input: unknown): string {
+// Task-key prefix: uppercase alphanumerics only, 1-6 chars, starting with a letter (e.g. "ms-site" -> "MSSITE").
+// Empty allowed. A task's key is `<prefix>-<seq>`, so a hyphen inside the prefix would be a second separator, and
+// search reads a key as a letter-led prefix (CARD_KEY in services/globalSearch.ts), so a digit-led one is never found.
+export function cleanPrefix(input: unknown): string {
   return String(input ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
 }
 
-// Default prefix from a board name: initials of the words, else the first letters. "Marketing Site" -> "MS".
+// Why a cleaned prefix can't be saved, or null when it can. The web form shows this before the server refuses.
+export function prefixError(prefix: string): string | null {
+  return /^[0-9]/.test(prefix) ? "must start with a letter" : null;
+}
+
+export function normalizePrefix(input: unknown): string {
+  const prefix = cleanPrefix(input);
+  const err = prefixError(prefix);
+  if (err) throw new Error(`task key prefix ${err}`);
+  return prefix;
+}
+
+// Default prefix from a board name: initials of the words, else the first letters, without any leading digits.
+// "Marketing Site" -> "MS", "2026 Roadmap" -> "R".
 export function derivePrefix(name: string): string {
   const words = name.trim().split(/\s+/).filter(Boolean);
   const initials = words.map((w) => w[0]).join("");
   const base = initials.length >= 2 ? initials : name.replace(/[^A-Za-z0-9]/g, "").slice(0, 3);
-  return normalizePrefix(base) || "TASK";
+  return cleanPrefix(base).replace(/^[0-9]+/, "") || "TASK";
 }
 
 export function columnIndex(cols: BoardColumn[], key: string): number {

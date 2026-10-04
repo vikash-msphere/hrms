@@ -77,22 +77,33 @@ export function normalizeSynonymGroups(raw: unknown): string[][] {
   return out;
 }
 
-type Lookup = { groups: SynonymGroups; byFirst: Map<string, { tokens: string[]; group: number }[]> };
+type Lookup = Map<string, { tokens: string[]; alternatives: string[][] }[]>;
 
-// Every member as its token list, keyed by first token, longest first - the lookup the greedy match below walks.
+// Every distinct spelling as its token list, keyed by first token, longest first - the lookup the greedy match
+// below walks - with what it widens to: the other members of EVERY group it is in. A spelling can sit in more
+// than one group, most often an org group reusing a built-in word ("vacation, holiday trip" beside the PTO
+// group), and each group must still widen it. Not transitive: two groups that share a word stay two groups for
+// all their other words, so one shared word cannot chain a precise query into a browse.
 function buildLookup(groups: SynonymGroups): Lookup {
-  const byFirst = new Map<string, { tokens: string[]; group: number }[]>();
+  const groupsOf = new Map<string, number[]>();
   for (const [group, members] of groups.entries()) {
     for (const member of members) {
-      const tokens = words(member);
-      if (!tokens.length) continue;
-      const list = byFirst.get(tokens[0]!) ?? [];
-      list.push({ tokens, group });
-      byFirst.set(tokens[0]!, list);
+      const spelling = words(member).join(" ");
+      if (spelling) groupsOf.set(spelling, [...(groupsOf.get(spelling) ?? []), group]);
     }
   }
+  const byFirst: Lookup = new Map();
+  for (const [spelling, inGroups] of groupsOf) {
+    const others = new Set(inGroups.flatMap((g) => groups[g]!.map((m) => words(m).join(" "))));
+    others.delete(spelling);
+    others.delete("");
+    const tokens = spelling.split(" ");
+    const list = byFirst.get(tokens[0]!) ?? [];
+    list.push({ tokens, alternatives: [...others].map((m) => m.split(" ")) });
+    byFirst.set(tokens[0]!, list);
+  }
   for (const list of byFirst.values()) list.sort((a, b) => b.tokens.length - a.tokens.length);
-  return { groups, byFirst };
+  return byFirst;
 }
 
 const BUILT_IN = buildLookup(SYNONYM_GROUPS);
@@ -113,7 +124,7 @@ export type QueryTerm = { typed: string[]; alternatives: string[][] };
 /** The query split into terms, each widened by its synonym group when it has one - built-in, or the org's
  *  own (`extra`, already normalised). */
 export function queryTerms(raw: string, extra: SynonymGroups = []): QueryTerm[] {
-  const { groups, byFirst } = lookupWith(extra);
+  const byFirst = lookupWith(extra);
   const tokens = words(raw).slice(0, MAX_TOKENS);
   const out: QueryTerm[] = [];
   for (let i = 0; i < tokens.length; ) {
@@ -123,9 +134,7 @@ export function queryTerms(raw: string, extra: SynonymGroups = []): QueryTerm[] 
       i++;
       continue;
     }
-    const typed = tokens.slice(i, i + hit.tokens.length);
-    const alternatives = groups[hit.group]!.map(words).filter((m) => m.join(" ") !== typed.join(" "));
-    out.push({ typed, alternatives });
+    out.push({ typed: hit.tokens, alternatives: hit.alternatives });
     i += hit.tokens.length;
   }
   return out;
