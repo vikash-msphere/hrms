@@ -10,7 +10,7 @@ test("the directory finds one person, and their profile deep-links to a section"
   const page = await as("hr");
 
   await gotoRoute(page, "employees", "Directory");
-  await page.getByPlaceholder("Search people…").fill("Eve");
+  await page.getByRole("searchbox", { name: "Search people…" }).fill("Eve");
   const row = page.locator("tbody tr").filter({ hasText: "Eve Employee" });
   await expect(row).toHaveCount(1);
   await row.click();
@@ -32,4 +32,16 @@ test("the directory finds one person, and their profile deep-links to a section"
   await expect(colleague.getByRole("tab", { name: "Documents" })).toHaveAttribute("aria-selected", "true");
 
   expect(profileUrl).toContain("/employees/");
+});
+
+// `/` jumps to the list's search box, and the box says so: a shortcut nothing on screen names is one nobody finds.
+test("the search box names the / key, and / puts the cursor in it", async ({ as }) => {
+  const page = await as("hr");
+
+  await gotoRoute(page, "employees", "Directory");
+  const search = page.getByRole("searchbox", { name: "Search people…" });
+  await expect(search).toHaveAttribute("placeholder", "Search (/) people…");
+  await page.getByRole("main").click({ position: { x: 4, y: 4 } });
+  await page.keyboard.press("/");
+  await expect(search).toBeFocused();
 });

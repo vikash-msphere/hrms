@@ -64,7 +64,7 @@ test("a sticker is suggested, picked, tuned, browsed for, removed, and posted", 
   await panel.getByRole("button", { name: "Browse" }).click();
   const picker = page.getByRole("dialog").filter({ hasText: "Choose a sticker" });
   await expect(picker).toBeVisible({ timeout: 30_000 });
-  await picker.getByPlaceholder("Search all illustrations…").fill("team");
+  await picker.getByRole("searchbox", { name: "Search all illustrations…" }).fill("team");
   const grid = picker.getByRole("group", { name: "Illustrations" });
   // The second tile: the first is "No sticker", which is a choice like any other and leads the grid.
   const browsed = grid.locator("button[data-tile]").nth(1);

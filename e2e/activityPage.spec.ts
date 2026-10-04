@@ -20,7 +20,7 @@ test("the activity page finds a change, and the permissions view narrows to acce
   await gotoRoute(page, "activity", "Activity");
 
   // The feed is search-first: the trail is thousands of rows, so finding the one you mean is the feature.
-  const search = page.getByPlaceholder(/Search action, person or record/);
+  const search = page.getByRole("searchbox", { name: /Search action, person or record/ });
   await search.fill(name);
   await search.press("Enter");
   const rows = page.locator("tbody tr");

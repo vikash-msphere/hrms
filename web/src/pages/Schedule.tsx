@@ -21,6 +21,7 @@ import { useDiscardGuard } from "@/hooks/useDiscardGuard";
 import { fmtDuration } from "@/components/common/TimeRangeField";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { SearchInput } from "@/components/common/SearchInput";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -244,7 +245,7 @@ export default function Schedule({ me }: { me: Me }) {
         </Select>
 
         <div className="ml-auto flex flex-wrap items-center gap-2">
-          <Input type="search" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search people…" className="h-8 w-40" />
+          <SearchInput value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search people…" className="h-8 w-40" />
           {departments.length > 0 && (
             <Select value={dept} onValueChange={setDept}>
               <SelectTrigger className="h-8 w-40"><SelectValue /></SelectTrigger>
@@ -902,7 +903,7 @@ function AssignScheduleDialog({ people, patterns, defaultFrom, shiftById, onCrea
             </Field>
           </FieldRow>
           <Field label={`People${picked.length ? ` (${picked.length} selected)` : ""}`}>
-            <Input type="search" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search people…" className="mb-2 h-8" />
+            <SearchInput value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search people…" className="mb-2 h-8" />
             <div className="max-h-56 space-y-0.5 overflow-y-auto rounded-lg border p-1">
               {listed.length === 0 ? (
                 <p className="px-2 py-3 text-sm text-muted-foreground">No people match that search.</p>

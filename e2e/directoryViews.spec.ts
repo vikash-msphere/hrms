@@ -31,7 +31,7 @@ test("the card view is a choice the browser remembers, and it groups by departme
   await page.getByRole("button", { name: "Card view" }).click();
   // Cards, and no table at all: a grid drawn beside a still-rendered table would look right and be wrong.
   await expect(rows(page)).toHaveCount(0, { timeout: 30_000 });
-  await expect(page.getByPlaceholder("Search people…").first()).toBeVisible();
+  await expect(page.getByRole("searchbox", { name: "Search people…" }).first()).toBeVisible();
 
   // Grouping is only offered on the cards (a table groups by sorting), and it redraws the same people under
   // department headings that count what is in them.

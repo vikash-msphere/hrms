@@ -574,6 +574,9 @@ describe("responsive coverage (rows)", () => {
         .forEach((raw, i) => {
           if (!/overflow-x-(auto|scroll)/.test(raw)) return;
           if (/scroll-shadow-x/.test(raw)) return;
+          // A row of chips fades its own edges with a mask instead (CommandPalette's useScrollEdges), so the chip
+          // running off the edge fades out; the class paints a shadow behind it and leaves it cut in half.
+          if (/style=\{\w+\.edgeFade\}/.test(raw)) return;
           // A <pre> is exempt: a code block that scrolls is a well-known shape, and a soft fade over
           // monospace on a tinted ground reads as a rendering fault rather than as an affordance.
           if (/<pre\b/.test(raw)) return;

@@ -1,4 +1,5 @@
-import { Search, ChevronRight, Plus, LifeBuoy, Ticket, LogIn, CircleDot, Bug, Menu, Loader2 } from "lucide-react";
+import { useLayoutEffect, useRef, useState, type RefObject } from "react";
+import { Search, ChevronRight, ChevronDown, Plus, LifeBuoy, Ticket, LogIn, LogOut, Bug, Menu, Loader2 } from "lucide-react";
 import { navBreadcrumb } from "@/nav";
 import { navigate } from "@/router";
 import { cn, humanize } from "@/lib/utils";
@@ -12,6 +13,7 @@ import { useMedia } from "@/hooks/useMedia";
 import { fmtDuration } from "@/lib/attendance";
 import { NotificationBell } from "@/components/layout/NotificationBell";
 import { UserMenu } from "@/components/layout/UserMenu";
+import { InlineSearch } from "@/components/layout/CommandPalette";
 import { LockButton } from "@/components/lock/LockButton";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import type { Me } from "@/types";
@@ -29,13 +31,64 @@ const platformName = (): string => {
 };
 const isMac = /Mac|iP(hone|ad|od)/.test(platformName());
 
-// The sticky application top bar: the drawer button and breadcrumb context on the left; global search, then
-// the rest of the chrome, then the quick-create "+" on the right. This gives every page consistent chrome and
-// one-step access to the common create flows.
+// The open search field's widest: room for the category chips in its drop-down on one line, and for the results
+// list with the preview pane beside it at a comfortable width (CommandPalette.tsx PREVIEW_ROOM_REM).
+const OPEN_FIELD_REM = 64;
+
+// How wide the search field may be while its results are open, and whether that crowds out the bar.
+//
+// It grows evenly on both sides of where it sits, so the open width is the most that fits inside the bar on
+// BOTH sides of that centre - the nearer edge decides - capped at OPEN_FIELD_REM, and never narrower than it
+// already is. Inside the room between the breadcrumb and the cluster it simply grows and nothing else moves;
+// only a field that would reach past that room is `crowded`, and then the bar fades out both sides together -
+// the breadcrumb (with the drawer button) and the cluster - rather than leaving half of either under the field,
+// and the field moves to the middle of the bar (`shift`), now that nothing else is in it.
+// Measured when the search opens and again whenever the bar resizes; null while it is closed.
+function useOpenSearchFit(open: boolean, header: RefObject<HTMLElement | null>, room: RefObject<HTMLElement | null>) {
+  const [fit, setFit] = useState<{ width: number; crowded: boolean; shift: number } | null>(null);
+  useLayoutEffect(() => {
+    const h = header.current;
+    if (!open || !h) {
+      setFit(null);
+      return;
+    }
+    const measure = () => {
+      const place = room.current?.querySelector<HTMLElement>("[data-search-place]");
+      if (!room.current || !place) return;
+      const rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+      const style = getComputedStyle(h);
+      const bar = h.getBoundingClientRect();
+      const left = bar.left + parseFloat(style.paddingLeft);
+      const right = bar.right - parseFloat(style.paddingRight);
+      const at = place.getBoundingClientRect();
+      const centre = at.left + at.width / 2;
+      const max = OPEN_FIELD_REM * rem;
+      const width = Math.floor(Math.max(at.width, Math.min(max, 2 * Math.min(centre - left, right - centre))));
+      const space = room.current.getBoundingClientRect();
+      const crowded = centre - width / 2 < space.left - 0.5 || centre + width / 2 > space.right + 0.5;
+      // Crowded, both sides are faded out and the field has the bar to itself - so it sits in the middle of the
+      // BAR, not of the room it came from (which the breadcrumb and the cluster made off-centre), and is as wide
+      // as the bar allows, up to the cap. `shift` is how far that middle is from where the field sits closed.
+      const next = crowded
+        ? { width: Math.floor(Math.max(at.width, Math.min(max, right - left))), crowded, shift: Math.round((left + right) / 2 - centre) }
+        : { width, crowded, shift: 0 };
+      setFit((prev) => (prev?.width === next.width && prev.crowded === next.crowded && prev.shift === next.shift ? prev : next));
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(h);
+    return () => observer.disconnect();
+  }, [open, header, room]);
+  return fit;
+}
+
+// The sticky application top bar: the drawer button and breadcrumb context on the left, global search in the
+// middle, and on the right the clock, the rest of the chrome, then the quick-create "+". This gives every page
+// consistent chrome and one-step access to the common create flows.
 //
 // On a phone this bar is the app's whole navigation chrome - there is no bottom bar. The drawer button is the
 // leftmost control, where a hamburger is expected, and the two controls that START something bracket the
-// cluster: search opens it, create closes it against the user menu. The rest of the desktop
+// right-hand controls: search opens them, create closes them against the user menu. The rest of the desktop
 // cluster still drops away below `md`: support folds into the create menu, and the clock back to the Dashboard
 // and Attendance page it mirrors - because nine 36px targets at 390px leave the breadcrumb no room at all.
 // (The theme switch is in the user menu at EVERY width - see UserMenu.)
@@ -90,10 +143,20 @@ export function TopBar({
     ...(standalone.length ? [{ id: "__standalone__", label: "Also", actions: standalone }] : []),
   ];
   const hasActions = groups.length > 0;
+  // While the search field's results are open, how wide the field may grow and whether it crowds out the rest
+  // of the bar (useOpenSearchFit).
+  const [searching, setSearching] = useState(false);
+  const headerRef = useRef<HTMLElement>(null);
+  const roomRef = useRef<HTMLDivElement>(null);
+  const openFit = useOpenSearchFit(searching, headerRef, roomRef);
+  // Faded out, not removed: the bar keeps its layout, so the field's centre - and with it the open field -
+  // stays put, and everything comes back in place when the search closes.
+  const crowdedOut = openFit?.crowded ? "pointer-events-none invisible opacity-0" : "";
   return (
     // data-app-top: installed as a PWA this is what the status bar overlaps, so it reserves the top inset
     // (see index.css). h-14 stays the bar's own height either way.
     <header
+      ref={headerRef}
       data-app-top
       className="sticky top-0 z-30 flex h-14 shrink-0 items-center gap-2 border-b bg-background/80 px-4 backdrop-blur standalone:h-auto standalone:min-h-14 sm:gap-3 sm:px-6 lg:px-8"
     >
@@ -105,12 +168,23 @@ export function TopBar({
         onClick={onOpenMenu}
         aria-label="Menu"
         aria-expanded={menuOpen}
-        className="-ml-1.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-foreground transition-colors hover:bg-accent hover:text-accent-foreground md:hidden"
+        className={cn(
+          "-ml-1.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-foreground transition-[color,background-color,opacity,visibility] duration-200 hover:bg-accent hover:text-accent-foreground md:hidden",
+          crowdedOut,
+        )}
       >
         <Menu className="h-5 w-5" />
       </button>
 
-      <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5 text-sm">
+      {/* One width on every page from `md` up (w-60, about the mean breadcrumb, which measured 235px across
+          the app's 106 pages): search sits in the middle of the room right of this, and a breadcrumb sized to
+          its own text moved and resized the field on every navigation. A shorter one leaves the rest blank, a
+          longer one truncates its last segment. Still allowed to shrink below that, so a narrow bar squeezes
+          the breadcrumb before anything overlaps. Fades out while an open search needs its room (crowdedOut). */}
+      <nav
+        aria-label="Breadcrumb"
+        className={cn("flex min-w-0 items-center gap-1.5 text-sm transition-[opacity,visibility] duration-200 md:w-60", crowdedOut)}
+      >
         {crumb ? (
           <>
             {/* group › workspace › active-tab. The leaf links to its own route base, so on a detail page
@@ -136,25 +210,49 @@ export function TopBar({
         )}
       </nav>
 
-      {/* Right-side chrome cluster: global search, the clock, alerts, quick-create, you. Tighter on a phone,
-          where each 36px target plus its gap is a tenth of a 390px row - and where the clock is not rendered
-          at all. */}
-      <div className="ml-auto flex items-center gap-1.5 sm:gap-2">
-        {/* Search leads the cluster. It is the most-reached control here and the only one that goes ANYWHERE,
-            so it reads as the start of the chrome rather than as one more icon in a row of them; it is also
-            the widest, which gives the eye a fixed landmark to find the rest of the cluster from. */}
+      {/* Global search: the most-reached control here and the only one that goes ANYWHERE. It takes all the
+          room between the breadcrumb and the clock and sits in the middle of it. That room is a container, and
+          what is drawn in it depends on its width:
+          - from 11rem up, the search itself as a field (InlineSearch, at most 36rem) whose results drop down
+            under it, with a placeholder sized to the room (see InlineSearch). Open, it grows evenly on both
+            sides to as much as 64rem (useOpenSearchFit), and only if that takes it past this room does it fade
+            out both sides of the bar - the breadcrumb and the cluster together - to have the width;
+          - under 11rem, where even "Search…" will not fit beside the ⌘K chip, a compact button - the magnifier
+            plus the chip, which teaches the shortcut - that opens the modal palette instead; on a phone, where it
+            sits against the cluster, the icon alone.
+          Both are mounted and the container query picks one, so the switch costs no measuring; ⌘K asks which one
+          is on screen (CommandPalette).
+          The min-width is the compact button's own: a container's content cannot size it, so without one a
+          long breadcrumb would squeeze the room to nothing and the button would spill over its neighbours.
+          From `md` the room keeps a margin inside each edge (px-4), so a field that fills it still stands clear of
+          the breadcrumb and of the clock pill rather than butting up against either; the same on both sides, so it
+          is still centred between them. */}
+      <div ref={roomRef} className="@container flex min-w-9 flex-1 justify-end sm:min-w-[5.5rem] md:min-w-[7.5rem] md:justify-center md:px-4">
+        <InlineSearch
+          me={me}
+          isMac={isMac}
+          onOpenChange={setSearching}
+          openWidth={openFit?.width}
+          openShift={openFit?.shift}
+          className="hidden w-full max-w-xl @min-[11rem]:block"
+        />
         <button
           onClick={onOpenSearch}
           aria-label="Search"
-          className="flex h-9 w-9 items-center justify-center gap-2 rounded-lg border bg-card text-sm text-foreground shadow-sm transition-colors hover:bg-accent hover:text-accent-foreground sm:w-36 sm:justify-start sm:px-3 lg:w-44"
+          aria-keyshortcuts={isMac ? "Meta+K" : "Control+K"}
+          title={`Search (${isMac ? "⌘" : "Ctrl"} K)`}
+          className="flex h-9 w-9 shrink-0 items-center justify-center gap-2 rounded-lg border bg-card text-sm text-muted-foreground transition-colors hover:border-ring/50 hover:text-foreground sm:w-auto sm:px-2.5 @min-[11rem]:hidden"
         >
           <Search className="h-4 w-4 shrink-0" />
-          <span className="hidden text-muted-foreground sm:inline">Search…</span>
-          <kbd className="ml-auto hidden rounded border bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground sm:inline">
+          <kbd className="hidden rounded border bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground sm:inline">
             {isMac ? "⌘" : "Ctrl"} K
           </kbd>
         </button>
+      </div>
 
+      {/* Right-side chrome cluster: the clock, alerts, quick-create, you. Tighter on a phone, where each 36px
+          target plus its gap is a tenth of a 390px row - and where the clock is not rendered at all. */}
+      <div className={cn("flex items-center gap-1.5 transition-[opacity,visibility] duration-200 sm:gap-2", crowdedOut)}>
         <ClockChip />
 
         {/* Mounted here rather than on the Tickets page because the whole point is that it opens without
@@ -170,13 +268,17 @@ export function TopBar({
         <RecordingChip />
         {reportProblem && <ReportProblemDialog />}
 
+        {/* Splits the clock from the row of icons that follows. From `md` up only: on a phone the clock is not
+            in the bar, so there is nothing before the icons to split off. */}
+        <div aria-hidden className="mx-1 hidden h-6 w-px bg-border md:block" />
+
         {newTicket && (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <button
                 aria-label="Support"
                 title="Support"
-                className="hidden h-9 items-center justify-center rounded-lg border bg-card px-2.5 text-foreground shadow-sm transition-colors hover:bg-accent hover:text-accent-foreground md:flex"
+                className="hidden h-9 w-9 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground md:flex"
               >
                 <LifeBuoy className="h-4 w-4 shrink-0" />
               </button>
@@ -205,32 +307,34 @@ export function TopBar({
           </DropdownMenu>
         )}
 
-        <NotificationBell />
-
         {/* The app lock (lib/appLock.ts), at every width: a phone left on a table needs it as much as a laptop
             left open. Next to the bell, with the other controls that are about the person rather than the page. */}
         <LockButton mac={isMac} />
+
+        {/* Last of the icons, so its unread badge sits against the New button rather than between two icons. */}
+        <NotificationBell />
 
         {/* Theme is not here at any width: a preference belongs with the person, so it is the segmented
             Appearance control inside UserMenu. */}
 
         {/* Create. Last in the cluster, next to the user menu, because it is the one control here that
             WRITES - the rest read - and this is the only "+" on a phone.
-            Carries the cluster's own icon-button style (bordered card, no fill) at every width rather than the
-            filled primary: a brand-coloured button here read as the page's main action from across the room,
-            which is never what it is - the page's own create button is in its header. */}
+            Bordered card, not the filled primary: a brand-coloured button here read as the page's main action
+            from across the room, which is never what it is - the page's own create button is in its header.
+            From `sm` up it carries the word and a chevron, since it opens a menu rather than creating one thing. */}
         {hasActions && (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <button
                 type="button"
-                className="flex h-9 w-9 items-center justify-center rounded-lg border bg-card text-foreground shadow-sm transition-colors hover:bg-accent hover:text-accent-foreground"
+                className="flex h-9 w-9 items-center justify-center gap-1.5 rounded-lg border bg-card text-sm font-medium text-foreground transition-colors hover:bg-accent hover:text-accent-foreground sm:w-auto sm:pl-2.5 sm:pr-2"
               >
                 <Plus className="h-4 w-4 shrink-0" />
-                {/* `sr-only` rather than dropped: the button's whole content is an aria-hidden icon, and
-                    without the word it is announced as "button". Not an aria-label either - the name is what
-                    every test and every voice command says, so it stays the visible word it used to be. */}
-                <span className="sr-only">New</span>
+                {/* `sr-only` on a phone rather than dropped: there the button's whole content is an aria-hidden
+                    icon, and without the word it is announced as "button". Not an aria-label either - the name
+                    is what every test and every voice command says, so it is the same visible word at every width. */}
+                <span className="sr-only sm:not-sr-only">New</span>
+                <ChevronDown className="hidden h-3.5 w-3.5 shrink-0 text-muted-foreground sm:block" />
               </button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="max-h-[70dvh] w-56 overflow-y-auto">
@@ -261,33 +365,83 @@ export function TopBar({
 }
 
 // Punch from any page with a cursor: from `md` up the clock lives in the chrome, not only on the Attendance
-// page (on a phone it is the Dashboard card and that page instead - see the className). The label is the
-// ACTION ("Clock out" while on the clock, "Clock in" when off it) - state is carried by the pulsing dot and
-// the success tint, and the elapsed time rides the tooltip, where it informs without competing with the verb.
-// Hidden until the open-session fetch lands, so it never flashes the wrong state.
+// page. Phone: not in the chrome at all. Punching is a once-or-twice-a-day act, and the Dashboard's own clock
+// card and the Attendance page are both one tap from there - so that row spends its 36px on the controls that
+// are wanted from ANY page instead. Same `lib/clock` state either way.
+//
+// Two shapes, one per state. Off the clock it is the bar's one filled button: "Clock in" is the thing the day
+// starts with, and nothing else here asks to be pressed. On the clock it becomes a status pill - a dot and the
+// time on the clock, read at a glance without hovering - with "Clock out" as a quiet button inside it, so the
+// state is what the eye lands on and the action is there when it is wanted.
+// The button is held back until the open-session fetch lands, so it never flashes the wrong state; its slot
+// is not (see below).
+//
+// The clock sits in a fixed-width slot, sized to the clocked-in pill at its widest (175px with "99h 59m" from
+// `lg`, where it carries its words - measured; the dot and an icon below that), and each state keeps its own
+// natural width inside it, right-aligned. Search is centred in the room left of the clock, so a clock that grew
+// on punching in would shrink that room and slide the field left under the cursor; the slot keeps the room one
+// width, and the spare space beside the narrower "Clock in" is just more of the middle. Because the slot holds
+// still, the time inside the pill can be as wide as it is, with "Clock out" right after it.
 function ClockChip() {
   const clock = useClock();
   const elapsed = useElapsedMinutes(clock.mine?.clock_in);
-  if (!clock.enabled || !clock.ready) return null;
-  const on = !!clock.mine;
-  const label = on ? "Clock out" : "Clock in";
+  if (!clock.enabled) return null;
+  return (
+    // data-clock-slot: wide.spec.ts measures the field's centring against this edge.
+    // The slot is there from the first render - `enabled` is known from the caller alone - and stays empty
+    // until the open-session fetch lands: a slot that arrived with the fetch narrowed the search room a moment
+    // after the page drew, and slid the field under the cursor on every load.
+    <div data-clock-slot className="hidden shrink-0 justify-end md:flex md:w-[4.25rem] lg:w-44">
+      {!clock.ready ? null : clock.mine ? <OnTheClock clock={clock} elapsed={elapsed} /> : <ClockInButton clock={clock} />}
+    </div>
+  );
+}
+
+const busyIcon = <Loader2 className="h-4 w-4 shrink-0 animate-spin" />;
+
+function ClockInButton({ clock }: { clock: ReturnType<typeof useClock> }) {
   return (
     <button
-      onClick={() => void clock.punch(on ? "clockOut" : "clockIn")}
+      onClick={() => void clock.punch("clockIn")}
       disabled={clock.busy}
       aria-busy={clock.busy || undefined}
-      aria-label={on ? `${label} (clocked in for ${fmtDuration(elapsed)})` : label}
-      title={on ? `Clocked in for ${fmtDuration(elapsed)} - clock out` : label}
-      className={cn(
-        // Phone: not in the chrome. Punching is a once-or-twice-a-day act, and the Dashboard's own clock
-        // card and the Attendance page are both one tap from here - so this row spends its 36px on the
-        // controls that are wanted from ANY page instead. Same `lib/clock` state either way.
-        "hidden h-9 items-center gap-2 rounded-lg border px-2.5 text-sm font-medium shadow-sm transition-colors disabled:opacity-60 md:flex",
-        on ? "border-success/40 bg-success/10 text-success hover:bg-success/20" : "bg-card text-foreground hover:bg-accent hover:text-accent-foreground",
-      )}
+      aria-label="Clock in"
+      title="Clock in"
+      className="flex h-9 shrink-0 items-center gap-2 rounded-lg bg-primary px-2.5 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-60 lg:px-3.5"
     >
-      {clock.busy ? <Loader2 className="h-4 w-4 shrink-0 animate-spin" /> : on ? <CircleDot className="h-4 w-4 shrink-0 animate-pulse" /> : <LogIn className="h-4 w-4 shrink-0" />}
-      <span className="hidden lg:inline">{label}</span>
+      {clock.busy ? busyIcon : <LogIn className="h-4 w-4 shrink-0" />}
+      <span className="hidden lg:inline">Clock in</span>
     </button>
+  );
+}
+
+// The time it shows is the DAY's: everything worked today so far - the sessions closed earlier (`workedToday`)
+// plus this one - with the breaks between them left out, which is the number a person tracks their day by. This
+// session alone is in the tooltip. Until the earlier sessions are read the time is left off rather than shown as
+// this session's and then jumping.
+function OnTheClock({ clock, elapsed }: { clock: ReturnType<typeof useClock>; elapsed: number }) {
+  const session = fmtDuration(elapsed);
+  const today = clock.workedToday === null ? null : fmtDuration(clock.workedToday + elapsed);
+  return (
+    <div
+      title={today === null ? `This session ${session}` : `Worked ${today} today - this session ${session}`}
+      className="flex h-9 shrink-0 items-center gap-1.5 rounded-lg border border-success/40 bg-success/10 pl-3 pr-1 text-success"
+    >
+      {/* Still, not pulsing, and toned down (half strength): the pill's colour already says "on the clock", so the
+          dot only marks it - anything that moves or shouts in the bar pulls the eye all day long. */}
+      <span aria-hidden className="h-2 w-2 shrink-0 rounded-full bg-success/50" />
+      {/* As wide as the time is, so "Clock out" follows it closely; the slot it sits in is what holds still. */}
+      {today !== null && <span className="hidden shrink-0 whitespace-nowrap text-sm font-semibold tabular-nums lg:inline">{today}</span>}
+      <button
+        onClick={() => void clock.punch("clockOut")}
+        disabled={clock.busy}
+        aria-busy={clock.busy || undefined}
+        aria-label={today === null ? `Clock out (this session ${session})` : `Clock out (worked ${today} today)`}
+        className="flex h-7 shrink-0 items-center gap-1.5 rounded-md px-1.5 text-sm font-medium transition-colors hover:bg-success/20 disabled:opacity-60"
+      >
+        {clock.busy ? busyIcon : <LogOut className="h-4 w-4 shrink-0 lg:hidden" />}
+        <span className="hidden lg:inline">Clock out</span>
+      </button>
+    </div>
   );
 }

@@ -20,7 +20,7 @@ test.describe("compensation", () => {
 
     // Somebody's own profile page, on the pay tab - compensation is never a list, it is one person's history.
     await gotoRoute(page, "employees", "Directory");
-    await page.getByPlaceholder("Search people…").fill("Eve");
+    await page.getByRole("searchbox", { name: "Search people…" }).fill("Eve");
     await page.locator("tbody tr").filter({ hasText: "Eve Employee" }).first().click();
     await page.getByRole("tab", { name: /Compensation|Pay/ }).first().click();
 
@@ -77,7 +77,7 @@ test.describe("compensation", () => {
     // An award is recorded against the person, on their own pay tab: it is a decision about them, and the
     // payroll run that covers its award date is what pays it out.
     await gotoRoute(page, "employees", "Directory");
-    await page.getByPlaceholder("Search people…").fill("Eve");
+    await page.getByRole("searchbox", { name: "Search people…" }).fill("Eve");
     await page.locator("tbody tr").filter({ hasText: "Eve Employee" }).first().click();
     await page.getByRole("tab", { name: /Compensation|Pay/ }).first().click();
 

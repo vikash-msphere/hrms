@@ -74,7 +74,7 @@ test.describe("the table pager", () => {
 
     // The narrowing that makes the cursor meaningless: page 2 of the whole directory is off the end of a
     // three-row result, and a table left on it would show the reader nothing and say "no records".
-    await page.getByPlaceholder("Search people…").first().fill("Eve");
+    await page.getByRole("searchbox", { name: "Search people…" }).first().fill("Eve");
     await expect(line(page, /^Page 1 of \d+$/)).toBeVisible({ timeout: 30_000 });
     await expect(rows(page).first()).toBeVisible();
   });
@@ -88,7 +88,7 @@ test.describe("the table pager", () => {
     // An empty table has two different causes and the app owes a different answer to each: nothing has been
     // created yet (offer the create), or a search excluded everything (offer the way back). Only a browser
     // can say which one was drawn - and getting it wrong strands the reader on a page that looks broken.
-    const search = page.getByPlaceholder("Search people…").first();
+    const search = page.getByRole("searchbox", { name: "Search people…" }).first();
     await search.fill("zzzz-nobody-zzzz");
     await expect(page.getByText("Nothing here matches what you're filtering by.").first()).toBeVisible({ timeout: 30_000 });
     await expect(line(page, /^No records$/)).toBeVisible();

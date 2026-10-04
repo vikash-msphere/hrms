@@ -34,6 +34,9 @@ export type SearchHit = {
   id: string; // internal record id; the route renders it as `<collection>/<id>` and the wire edge tokenizes it
   title: string | null;
   subtitle: string | null;
+  // When the source row was created (`search_docs.created_at`): a Date from a query-builder select, epoch ms
+  // from a raw one; the route sends either as `create_time`. The palette groups newest-first results by it.
+  createdAt?: Date | number | null;
   // Found by meaning only, not by the typed words. The palette shows these apart, under "Related", after
   // every keyword hit - they are a suggestion, and presenting one as a match is what made them read as wrong.
   related?: true;
@@ -106,7 +109,7 @@ async function cardsByKey(deps: Deps, q: string, branch: SQL): Promise<ScoredHit
     .where(and(inArray(schema.cards.boardId, boards.map((b) => b.uuid)), eq(schema.cards.seq, Number(m[2]))));
   if (!cards.length) return [];
   const found = await deps.db
-    .select({ collection: docs.collection, id: docs.recordId, code: docs.code, title: docs.title, subtitle: docs.subtitle })
+    .select({ collection: docs.collection, id: docs.recordId, code: docs.code, title: docs.title, subtitle: docs.subtitle, createdAt: docs.createdAt })
     .from(docs)
     .where(and(eq(docs.collection, "cards"), inArray(docs.recordId, cards.map((c) => c.uuid)), eq(docs.deleted, false), branch));
   return found.map((r) => ({ ...r, exact: true }));
@@ -237,13 +240,60 @@ const collectionIn = (collections: string[]): SQL =>
 
 // The row filter for one collection, or null when it provably matches nothing. Mirrors what that collection's
 // own list service binds: "scoped" -> applyScope on the copied (code, owner) columns, "flat" -> nothing beyond
-// the read grant, "self" -> hard-pinned to the caller.
-function scopePredicate(user: AppUser, collection: string, scope: ListScope): SQL | null | undefined {
+// the read grant, "self" -> hard-pinned to the caller. `cols` is which table's columns it tests: the index's own
+// by default, or `search_counts`' when counting (searchKindCounts).
+function scopePredicate(
+  user: AppUser,
+  collection: string,
+  scope: ListScope,
+  cols: { code: typeof docs.code | typeof schema.searchCounts.parentCode; owner: typeof docs.ownerId | typeof schema.searchCounts.ownerId } = { code: docs.code, owner: docs.ownerId },
+): SQL | null | undefined {
   const entry = SEARCH_INDEX.find((e) => e.collection === collection);
   if (!entry) return null;
   if (entry.scoping.kind === "flat") return undefined; // no row filter
-  if (entry.scoping.kind === "self") return user.employeeId ? eq(docs.ownerId, user.employeeId) : null;
-  return applyScope(scope, docs.code, docs.ownerId) ?? undefined;
+  if (entry.scoping.kind === "self") return user.employeeId ? eq(cols.owner, user.employeeId) : null;
+  return applyScope(scope, cols.code, cols.owner) ?? undefined;
+}
+
+/**
+ * How many records of each kind this caller can search - the totals the palette shows on its `in:` suggestions,
+ * biggest first. ONE grouped read of `search_counts` (src/db/schema.ts), the index pre-counted by everything
+ * visibility tests, under the SAME scope predicates the search binds over `search_docs`: a few rows per kind
+ * per owner, where counting `search_docs` itself would read every row the caller can see (no index serves the
+ * scope test there).
+ *
+ * The counter rows hold a record's code without its own last segment. Every breadth and subtree grant names a
+ * code above that, so they answer exactly; a per-record share or deny can name the record's own code, which the
+ * counters cannot see - so a kind whose scope carries any is left out (no total) rather than counted wrong, and
+ * never counted past what the caller may see.
+ */
+export async function searchKindCounts(deps: Deps, user: AppUser, scopes: Map<string, ListScope>): Promise<Record<string, number>> {
+  const counts = schema.searchCounts;
+  const cols = { code: counts.parentCode, owner: counts.ownerId };
+  // Kinds that scope alike share one branch, as in globalSearch, so the statement stays inside D1's parameter cap.
+  const groups = new Map<string, { collections: string[]; pred: SQL | undefined }>();
+  for (const entry of SEARCH_INDEX) {
+    const scope = scopes.get(entry.collection);
+    if (!scope) continue; // not listable by this caller
+    if (scope.shares?.length || scope.denies?.length) continue; // per-record: not answerable from the counters
+    const pred = scopePredicate(user, entry.collection, scope, cols);
+    if (pred === null) continue; // provably empty
+    const publicOnly = !scope.seeRestricted;
+    const key = `${publicOnly}|${pred ? JSON.stringify([scope.breadth, scope.deptCode, scope.ownerId, scope.subtrees, entry.scoping.kind]) : "flat"}`;
+    const existing = groups.get(key);
+    if (existing) existing.collections.push(entry.collection);
+    else groups.set(key, { collections: [entry.collection], pred: publicOnly ? and(pred, eq(counts.restricted, false)) : pred });
+  }
+  if (groups.size === 0) return {};
+  const branches = [...groups.values()].map((g) =>
+    and(sql.raw(`"search_counts"."collection" in (${g.collections.map((c) => `'${c}'`).join(", ")})`), g.pred)!,
+  );
+  const rows = await deps.db
+    .select({ collection: counts.collection, n: sql<number>`sum(${counts.n})` })
+    .from(counts)
+    .where(or(...branches))
+    .groupBy(counts.collection);
+  return Object.fromEntries(rows.filter((r) => Number(r.n) > 0).map((r) => [r.collection, Number(r.n)]));
 }
 
 /** Run the search over the collections the middleware said this caller may list. Returns [] for a query under
@@ -390,7 +440,7 @@ export async function globalSearch(
   // matched on text, so these rows are `exact`: there are no matched words for the field gate to re-explain.
   if (browse) {
     const listed = await deps.db.all<SearchHit & { code: string | null }>(sql`
-      select ${docs.collection} as collection, ${docs.recordId} as id, ${docs.code} as code, ${docs.title} as title, ${docs.subtitle} as subtitle
+      select ${docs.collection} as collection, ${docs.recordId} as id, ${docs.code} as code, ${docs.title} as title, ${docs.subtitle} as subtitle, ${docs.createdAt} as createdAt
       from ${docs}
       where ${eq(docs.deleted, false)} and (${or(...branches)})
       order by ${docs.createdAt} desc
@@ -410,13 +460,13 @@ export async function globalSearch(
     : sql`bm25("search_fts") * (1.0 + ${sql.raw(String(TITLE_BOOST))} * ${inTitle} + ${sql.raw(String(OWN_BOOST))} * ${mine} + ${sql.raw(String(RECENT_BOOST))} * ${recent})`;
   // The FTS table is named, not aliased: bm25() takes the table itself as its first argument.
   const rows = await deps.db.all<SearchHit & { code: string | null }>(sql`
-    select ${docs.collection} as collection, ${docs.recordId} as id, ${docs.code} as code, ${docs.title} as title, ${docs.subtitle} as subtitle
+    select ${docs.collection} as collection, ${docs.recordId} as id, ${docs.code} as code, ${docs.title} as title, ${docs.subtitle} as subtitle, ${docs.createdAt} as createdAt
     from "search_fts" join ${docs} on ${docs}."rowid" = "search_fts"."rowid"
     where "search_fts" match ${match!} and ${eq(docs.deleted, false)} and (${or(...branches)})
     order by ${order}
     limit ${sql.raw(String(TOTAL))}
   `);
-  const matched = rows.map((r) => ({ collection: r.collection, id: r.id, code: r.code, title: r.title, subtitle: r.subtitle }));
+  const matched = rows.map((r) => ({ collection: r.collection, id: r.id, code: r.code, title: r.title, subtitle: r.subtitle, createdAt: r.createdAt }));
   // A board task's key ("MS-12") first, when that is what was typed. Read under the SAME branch predicate the
   // cards rows above were, so a card the caller cannot list is not found this way either.
   const cardsAt = [...groups.values()].findIndex((g) => g.collections.includes("cards"));
@@ -531,7 +581,7 @@ async function semanticHits(
   // decides membership either way.
   const found = await byIdChunks(ids, (chunk) =>
     deps.db
-      .select({ collection: docs.collection, id: docs.recordId, code: docs.code, title: docs.title, subtitle: docs.subtitle })
+      .select({ collection: docs.collection, id: docs.recordId, code: docs.code, title: docs.title, subtitle: docs.subtitle, createdAt: docs.createdAt })
       .from(docs)
       .where(and(inArray(docs.recordId, chunk), collectionIn(collections), eq(docs.deleted, false), or(...branches))) as PromiseLike<
       (SearchHit & { code: string | null })[]

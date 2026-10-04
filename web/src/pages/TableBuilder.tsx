@@ -38,6 +38,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import { SearchInput } from "@/components/common/SearchInput";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Sheet, SheetBody, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 
@@ -1871,7 +1872,7 @@ function ColumnPicker({ open, onClose, base, catalogue, selected, headers, onSav
           </nav>
           <div className="relative">
             <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-            <Input value={query} onChange={(e) => setQuery(e.target.value)} disabled={loadingNode} placeholder={`Search ${trail.length ? trail[trail.length - 1]!.label.toLowerCase() : (catalogue.label ?? "").toLowerCase()} fields`} className="pl-8" />
+            <SearchInput value={query} onChange={(e) => setQuery(e.target.value)} disabled={loadingNode} placeholder={`Search ${trail.length ? trail[trail.length - 1]!.label.toLowerCase() : (catalogue.label ?? "").toLowerCase()} fields`} className="pl-8" />
           </div>
           {/* THE TABLE AS IT WILL READ. A row of chips said which fields were on it and nothing else: not what
               order they came in (the order of picking, which nobody chose), and not what their headers say

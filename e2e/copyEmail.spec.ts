@@ -19,7 +19,7 @@ test("an email is copied from the directory, exactly as written", async ({ as })
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
 
   await gotoRoute(page, "employees", "Directory");
-  await page.getByPlaceholder("Search people…").first().fill("Eve");
+  await page.getByRole("searchbox", { name: "Search people…" }).first().fill("Eve");
   const row = page.locator('tbody tr[role="button"]').filter({ hasText: "Eve Employee" }).first();
   await expect(row).toBeVisible({ timeout: 30_000 });
 

@@ -1,4 +1,4 @@
-import { aiLocalUp, gotoRoute, patchSettings, purge, runCron, SPA_HEADERS, test, expect } from "./fixtures";
+import { aiLocalUp, gotoRoute, patchSettings, purge, runCron, searchBox, searchPanel, SPA_HEADERS, test, expect } from "./fixtures";
 
 // The AI layer in a browser, in its three states: switched off, switched on, and switched on with a model
 // answering.
@@ -61,7 +61,7 @@ test.describe("with the AI features switched off", () => {
     await gotoRoute(page, "dashboard");
 
     await page.keyboard.press("ControlOrMeta+k");
-    const search = page.getByPlaceholder("Search people, records, pages and settings…");
+    const search = searchBox(page);
     await expect(search).toBeVisible();
 
     // The semantic half is skipped entirely with the feature off, so this is the FTS path answering on its
@@ -70,7 +70,7 @@ test.describe("with the AI features switched off", () => {
     await expect(page.getByRole("option").filter({ hasText: "Eve Employee" }).first()).toBeVisible({ timeout: 30_000 });
 
     await page.keyboard.press("Escape");
-    await expect(search).toBeHidden();
+    await expect(searchPanel(page)).toHaveCount(0);
   });
 
   test("the announcement composer offers no Draft button, and still posts", async ({ as }) => {
@@ -583,7 +583,7 @@ test.describe("the AI features fed by the cron tick", () => {
 
       await gotoRoute(page, "dashboard");
       await page.keyboard.press("ControlOrMeta+k");
-      const search = page.getByPlaceholder("Search people, records, pages and settings…");
+      const search = searchBox(page);
       await expect(search).toBeVisible();
 
       // NOT ONE WORD IN COMMON with the ticket, which is the entire point. "computer" is not "laptop", "hot"
@@ -634,7 +634,7 @@ test.describe("the AI features fed by the cron tick", () => {
 
       await gotoRoute(page, "dashboard");
       await page.keyboard.press("ControlOrMeta+k");
-      const search = page.getByPlaceholder("Search people, records, pages and settings…");
+      const search = searchBox(page);
       await expect(search).toBeVisible();
       await search.fill("my computer gets too hot");
 

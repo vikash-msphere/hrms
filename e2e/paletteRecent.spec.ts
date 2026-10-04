@@ -1,4 +1,4 @@
-import { gotoRoute, test, expect } from "./fixtures";
+import { gotoRoute, searchBox, searchPanel, test, expect } from "./fixtures";
 
 // The palette learns where you live.
 //
@@ -12,7 +12,6 @@ import { gotoRoute, test, expect } from "./fixtures";
 // and the memory is written down rather than held in the page - so it is still there after a reload.
 //
 // `search` covers opening and navigating; `searchScope` covers what the list is allowed to contain.
-const PLACEHOLDER = "Search people, records, pages and settings…";
 
 test("what the palette is used for comes back at the top of it", async ({ as }) => {
   test.setTimeout(120_000);
@@ -21,21 +20,22 @@ test("what the palette is used for comes back at the top of it", async ({ as }) 
   const page = await as("super");
   await gotoRoute(page, "dashboard");
 
-  const palette = page.getByRole("dialog", { name: "Search everything" });
+  const palette = searchPanel(page);
   const open = async () => {
     // ControlOrMeta so this is the same test on a mac laptop and a linux CI runner.
     await page.keyboard.press("ControlOrMeta+k");
-    await expect(page.getByPlaceholder(PLACEHOLDER)).toBeVisible();
+    await expect(palette).toBeVisible();
   };
 
   await open();
   // The empty-query view: the catalogue is there, and Recent is not.
-  await expect(palette.getByText("Go to", { exact: true })).toBeVisible({ timeout: 30_000 });
+  // By role: a group is named by its heading, and "Pages" is also a category chip's word.
+  await expect(palette.getByRole("group", { name: "Pages" })).toBeVisible({ timeout: 30_000 });
   await expect(palette.getByText("Recent", { exact: true })).toHaveCount(0);
 
   // Use it for something. Clicked rather than Entered: this spec is about what is remembered, so which row
   // was taken has to be beyond doubt.
-  await page.getByPlaceholder(PLACEHOLDER).fill("vendors");
+  await searchBox(page).fill("vendors");
   await palette.getByRole("option").filter({ hasText: "Vendors" }).first().click();
   await expect(page.getByRole("heading", { level: 1, name: "Vendors" })).toBeVisible({ timeout: 30_000 });
 

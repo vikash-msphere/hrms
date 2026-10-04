@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { SPA_HEADERS, allowConsoleErrors, gotoRoute, purge, test, expect } from "./fixtures";
+import { SPA_HEADERS, allowConsoleErrors, gotoRoute, purge, searchBox, searchPanel, test, expect } from "./fixtures";
 
 // Every "+" and ⌘K action, run.
 //
@@ -97,8 +97,8 @@ test.describe("every quick action", () => {
           // the action by name.
           await gotoRoute(page, "dashboard");
           await page.keyboard.press("ControlOrMeta+k");
-          const palette = page.getByRole("dialog", { name: "Search everything" });
-          const search = page.getByPlaceholder("Search people, records, pages and settings…");
+          const palette = searchPanel(page);
+          const search = searchBox(page);
           await expect(search).toBeVisible({ timeout: 15_000 });
           await search.fill(label);
           const row = palette.getByRole("option").filter({ hasText: label }).first();

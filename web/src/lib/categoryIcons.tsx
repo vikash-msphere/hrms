@@ -15,7 +15,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { Input } from "@/components/ui/input";
+import { SearchInput } from "@/components/common/SearchInput";
 
 // Curated icon set, keyed by the kebab-case name we store. Statically imported so the bundler tree-shakes
 // exactly these into the vendor chunk (no dynamic per-icon chunks). Add a line to widen the choice.
@@ -72,7 +72,7 @@ export function IconPicker({ value, onChange, className }: { value?: string; onC
         </button>
       </PopoverTrigger>
       <PopoverContent className="w-64 p-2" align="start">
-        <Input type="search" autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search icons…" className="mb-2 h-8" />
+        <SearchInput autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search icons…" className="mb-2 h-8" />
         <div className="grid grid-cols-7 gap-1">
           {list.map((n) => {
             const Icon = ICON_MAP[n];

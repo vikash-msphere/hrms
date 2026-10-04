@@ -34,7 +34,7 @@ test("an asset is checked into stock by typing its tag, and a wrong tag is refus
   try {
     await gotoRoute(page, "assets", "Assets");
     await page.getByRole("button", { name: "Filter by name" }).click();
-    await page.getByPlaceholder("Search name").fill(name);
+    await page.getByRole("searchbox", { name: "Search name" }).fill(name);
     await page.keyboard.press("Escape");
     const row = page.locator("tbody tr").filter({ hasText: name }).first();
     await expect(row).toBeVisible({ timeout: 30_000 });

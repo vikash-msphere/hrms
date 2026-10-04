@@ -56,14 +56,14 @@ test("a nominated colleague is asked for 360 feedback, and their answer lands on
   await card.getByRole("button", { name: "Request feedback" }).click();
   const picker = manager.getByRole("dialog");
   await expect(picker.getByRole("heading", { name: `Request 360 feedback on ${revieweeName}` })).toBeVisible({ timeout: 30_000 });
-  await picker.getByPlaceholder("Search name…").fill(revieweeName);
+  await picker.getByRole("searchbox", { name: "Search name…" }).fill(revieweeName);
   await expect(picker.getByRole("checkbox", { name: revieweeName })).toHaveCount(0);
 
   // Nothing is sent until somebody is picked, which is what stops an empty press creating a cycle of
   // silence nobody chased.
   const send = picker.getByRole("button", { name: "Send requests" });
   await expect(send).toBeDisabled();
-  await picker.getByPlaceholder("Search name…").fill(peerName);
+  await picker.getByRole("searchbox", { name: "Search name…" }).fill(peerName);
   await picker.getByRole("checkbox", { name: peerName }).click();
   await expect(send).toBeEnabled();
   await send.click();

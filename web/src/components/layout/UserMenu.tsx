@@ -80,7 +80,7 @@ export function UserMenu({ me }: { me: Me }) {
         // The avatar is 32px, which is the right visual weight in a 56px bar and two thirds of a fingertip.
         // The box takes the floor without the avatar changing size - this is the only route to sign out and
         // switch theme, so it is not a control to miss.
-        className="flex items-center justify-center gap-1.5 rounded-full transition-opacity hover:opacity-90 focus:outline-hidden focus-visible:ring-2 focus-visible:ring-sidebar-accent coarse:min-h-9 coarse:min-w-9"
+        className="flex items-center justify-center gap-1.5 rounded-full p-0.5 transition-colors hover:bg-accent focus:outline-hidden focus-visible:ring-2 focus-visible:ring-sidebar-accent sm:pr-1.5 coarse:min-h-9 coarse:min-w-9"
       >
         <PhotoAvatar employeeId={me.employee_id ?? ""} name={name} photo={emp?.photo} className="h-8 w-8 shrink-0" />
         <ChevronDown className="hidden h-4 w-4 shrink-0 text-muted-foreground sm:block" />

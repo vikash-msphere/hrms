@@ -13,7 +13,7 @@ test("HR computes a leaver's full and final settlement, and the breakdown reads 
   const page = await as("super");
 
   await gotoRoute(page, "employees", "Directory");
-  await page.getByPlaceholder("Search people…").fill("Eve");
+  await page.getByRole("searchbox", { name: "Search people…" }).fill("Eve");
   await page.locator("tbody tr").filter({ hasText: "Eve Employee" }).first().click();
   await page.getByRole("tab", { name: /Compensation|Pay/ }).first().click();
 

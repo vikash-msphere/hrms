@@ -22,6 +22,7 @@ import { ActivitySection } from "@/components/common/ActivitySection";
 import { Button } from "@/components/ui/button";
 import { AccessAction } from "@/components/access/AccessAction";
 import { Input } from "@/components/ui/input";
+import { SearchInput } from "@/components/common/SearchInput";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/components/ui/use-toast";
@@ -292,7 +293,7 @@ export default function Departments({ embedded, title }: { me?: Me; embedded?: b
                 {employees.length > 8 && (
                   <div className="relative">
                     <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                    <Input type="search" value={mgrQuery} onChange={(e) => setMgrQuery(e.target.value)} placeholder="Search people…" className="h-9 pl-8" />
+                    <SearchInput value={mgrQuery} onChange={(e) => setMgrQuery(e.target.value)} placeholder="Search people…" className="h-9 pl-8" />
                   </div>
                 )}
                 <div className="max-h-44 space-y-1.5 overflow-y-auto rounded-md border p-2">

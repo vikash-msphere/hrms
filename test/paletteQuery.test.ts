@@ -145,6 +145,14 @@ describe("filter suggestions", () => {
     expect(tokens("in:", 3, { ...ctx, vocabulary: null })).toBeNull(); // not loaded yet
   });
 
+  it("offers every kind after in:, not the first eight - the palette ranks them, so cutting here cut alphabetically", () => {
+    const many = Array.from({ length: 12 }, (_, i) => ({ collection: `kind-${String(i).padStart(2, "0")}`, statuses: [`state${i}`] }));
+    const wide = { ...ctx, vocabulary: many, labelOf: (c: string) => c };
+    expect(tokens("in:", 3, wide)).toHaveLength(12);
+    // Every other key keeps its cap of eight: twelve statuses, eight offered.
+    expect(tokens("status:", 7, wide)).toHaveLength(8);
+  });
+
   it("completes status: from every collection, or only from the ones in: names", () => {
     expect(tokens("status:")).toEqual(["status:pending", "status:approved", "status:in_progress", "status:open"]);
     expect(tokens("status:prog")).toEqual(["status:in_progress"]);

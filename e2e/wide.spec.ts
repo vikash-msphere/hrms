@@ -1,5 +1,5 @@
 import type { Locator, Page } from "@playwright/test";
-import { SPA_HEADERS, fileLeave, gotoRoute, purge, test, expect } from "./fixtures";
+import { SPA_HEADERS, fileLeave, gotoRoute, makeThrowawayPerson, purge, retireThrowawayPerson, searchPanel, test, expect } from "./fixtures";
 
 // The wide-screen layout, measured on a wide screen (docs/06-responsive-ui.md, "Wide screens").
 //
@@ -29,6 +29,66 @@ test("main has one width and one position on every page, a board included", asyn
   const boards = await box(page.getByRole("main"));
   expect(Math.round(boards.width), "a board is as wide as the tab beside it").toBe(1920);
   expect(Math.round(boards.x), "and starts where that tab's page starts").toBe(Math.round(goals.x));
+});
+
+// The search field sits in the middle of the room between the breadcrumb and the clock. Both keep one width -
+// the clock in either state, the breadcrumb on every page - so neither a punch nor a page change moves the field
+// or narrows it (TopBar.tsx).
+test("the top bar's search field is centred between the breadcrumb and the clock, and neither a punch nor a page change moves it", async ({ as }) => {
+  // A login of its own: punching one of the seeded five would race clock.spec.ts on the same person.
+  const admin = await as("super");
+  const person = await makeThrowawayPerson(admin, "WideClock");
+  try {
+    const page = await as({ email: person.email });
+    await gotoRoute(page, "dashboard");
+    const bar = page.getByRole("banner");
+    const search = bar.locator("[data-search-field]");
+    const centredBetweenNeighbours = async () => {
+      const [crumb, clock, field] = [await box(bar.getByRole("navigation", { name: "Breadcrumb" })), await box(bar.locator("[data-clock-slot]")), await box(search)];
+      expect(Math.abs(field.x + field.width / 2 - (crumb.x + crumb.width + clock.x) / 2), "centred between the breadcrumb and the clock").toBeLessThanOrEqual(1);
+      return field;
+    };
+
+    const before = await centredBetweenNeighbours();
+    // 2560 leaves the field far more room than it needs, so its 36rem cap is what sets the width.
+    expect(Math.round(before.width)).toBe(576);
+
+    await bar.getByRole("button", { name: /^Clock in$/ }).click();
+    await expect(bar.getByRole("button", { name: /^Clock out/ })).toBeVisible();
+    const clockedIn = await centredBetweenNeighbours();
+    expect(Math.round(clockedIn.x), "clocking in does not move it").toBe(Math.round(before.x));
+    expect(Math.round(clockedIn.width), "or narrow it").toBe(Math.round(before.width));
+
+    // Another page has another breadcrumb, but the breadcrumb is one width on every page, so the field stays put.
+    await gotoRoute(page, "attendance", "Attendance");
+    const elsewhere = await centredBetweenNeighbours();
+    expect(Math.round(elsewhere.x), "another page's breadcrumb does not move it").toBe(Math.round(before.x));
+    expect(Math.round(elsewhere.width)).toBe(Math.round(before.width));
+
+    await bar.getByRole("button", { name: /^Clock out/ }).click();
+    await expect(bar.getByRole("button", { name: /^Clock in$/ })).toBeVisible();
+
+    // With the field on screen, ⌘K searches in it - its results drop down under it - rather than opening the
+    // modal palette over the page (CommandPalette.tsx).
+    await page.keyboard.press("ControlOrMeta+k");
+    await expect(bar.getByRole("combobox", { name: "Search everything" })).toBeFocused();
+    await expect(searchPanel(page)).toBeVisible();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    // Open, the field grows evenly on both sides to its 64rem cap - the centre stays where it was - and a bar
+    // this wide has the room for that between the breadcrumb and the clock, so neither is hidden.
+    await expect.poll(async () => Math.round((await search.boundingBox())?.width ?? 0)).toBe(1024);
+    // At that width the results have the preview pane beside them.
+    await expect(page.getByRole("complementary", { name: "Preview" })).toBeVisible();
+    const open = (await search.boundingBox())!;
+    expect(Math.abs(open.x + open.width / 2 - (before.x + before.width / 2)), "it grows about its own centre").toBeLessThanOrEqual(1);
+    await expect(bar.getByRole("navigation", { name: "Breadcrumb" })).toBeVisible();
+    await expect(bar.getByRole("button", { name: /^Clock in$/ })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(searchPanel(page)).toHaveCount(0);
+    await expect.poll(async () => Math.round((await search.boundingBox())?.width ?? 0)).toBe(Math.round(before.width));
+  } finally {
+    await retireThrowawayPerson(admin, person.path);
+  }
 });
 
 test("the people grid adds columns instead of widening its cards", async ({ as }) => {
@@ -166,7 +226,7 @@ test("a leave request's detail docks beside the list, and another row swaps it",
     await page.getByRole("tab", { name: /^Requests/ }).click();
     // Narrowed through the page's own server-side search, which reaches the whole collection; the date is what
     // makes each row unmistakably this spec's.
-    const search = page.getByPlaceholder(/Search all records/);
+    const search = page.getByRole("searchbox", { name: "Search all records" });
     if (await search.waitFor({ state: "visible", timeout: 10_000 }).then(() => true).catch(() => false)) {
       await search.fill(String(stamp));
     }

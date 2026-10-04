@@ -40,6 +40,7 @@ import { StatCard } from "@/components/common/StatCard";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { SearchInput } from "@/components/common/SearchInput";
 import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Combobox } from "@/components/ui/combobox";
@@ -350,7 +351,7 @@ function BoardToolbar({ filter, board, cards, empName, empPhoto, deptName }: { f
     <div className="mb-3 flex flex-wrap items-center gap-2">
       <div className="relative">
         <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-        <Input type="search" value={filter.q} onChange={(e) => filter.setQ(e.target.value)} placeholder="Search tasks…" className="h-8 w-52 pl-7" />
+        <SearchInput value={filter.q} onChange={(e) => filter.setQ(e.target.value)} placeholder="Search tasks…" className="h-8 w-52 pl-7" />
       </div>
       {avatarStrip.length > 1 && (
         <div className="flex items-center -space-x-1.5">

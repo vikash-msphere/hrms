@@ -18660,6 +18660,28 @@ paths:
                           items: { type: string }
                           description: "Empty when the collection has no status column, or one that holds free text."
         '500': { $ref: '#/components/responses/Problem' }
+  /v1/search:counts:
+    get:
+      description: "Custom method counts: how many records of each kind the caller can search - the totals the search box shows on its `in:` suggestions, biggest first. Counted under the same per-collection list scope the search applies, from a pre-counted table rather than the index itself. A kind the caller may list but whose scope carries per-record shares or denies is left out, as is one with nothing in it."
+      operationId: ":CountsSearch"
+      responses:
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/PermissionDenied' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  counts:
+                    type: object
+                    additionalProperties: { type: integer, minimum: 1 }
+                    description: "Collection name to how many of its records the caller can search."
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/search:
     get:
       description: "Global search across every collection the caller may list. Each collection is included only if the caller's list decision for it allows, and its rows are filtered by that collection's own list scope, so a hit is always a row the caller could already have listed."
@@ -18769,6 +18791,7 @@ paths:
                         collection: { type: string, description: "Wire collection the hit belongs to." }
                         title: { type: [string, 'null'] }
                         subtitle: { type: [string, 'null'] }
+                        create_time: { type: string, format: date-time, description: "When the record was created. Absent on the few index rows written before the index carried it." }
                         related: { type: boolean, description: "Present and true when the hit was found by meaning (the semantic index) rather than by the typed words. Related hits follow every keyword hit." }
                 x-aep-resource:
                   singular: search-result-set

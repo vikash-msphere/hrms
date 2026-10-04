@@ -48,7 +48,7 @@ test("a person's access is granted and revoked from the Users permission sheet",
     await expect(sheet.getByText(/Role: Employee/)).toBeVisible();
 
     // Sixty collections is a scanning problem, so the grid is filtered rather than scrolled.
-    await sheet.getByPlaceholder("Filter collections…").fill("Vendors");
+    await sheet.getByRole("searchbox", { name: "Filter collections…" }).fill("Vendors");
     // `has:` page-rooted, not re-scoped from `sheet` - a has-locator carries its whole ancestor chain into
     // the containment check, so `sheet.getByRole(...)` would ask each row to contain another dialog nested
     // inside it (it never will) and silently match nothing.

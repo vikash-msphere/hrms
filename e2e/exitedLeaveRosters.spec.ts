@@ -47,7 +47,7 @@ test("an exited manager leaves the directory and the org chart, and their report
 
     // Directory: the report is listed, the leaver is not.
     await gotoRoute(page, "employees", "Directory");
-    await page.getByPlaceholder("Search people…").fill(`Exit${stamp}`);
+    await page.getByRole("searchbox", { name: "Search people…" }).fill(`Exit${stamp}`);
     await expect(page.locator("tbody tr").filter({ hasText: report })).toHaveCount(1, { timeout: 30_000 });
     await expect(page.locator("tbody tr").filter({ hasText: leaver })).toHaveCount(0);
 
@@ -55,9 +55,9 @@ test("an exited manager leaves the directory and the org chart, and their report
     await gotoRoute(page, "org-chart", "Org Chart");
     await expect(page.getByText(/report(s)? to someone who has left/).first()).toBeVisible({ timeout: 30_000 });
     await expect(page.getByRole("button", { name: report, exact: true }).first()).toBeVisible();
-    await page.getByPlaceholder("Find someone…").fill(leaver);
+    await page.getByRole("searchbox", { name: "Find someone…" }).fill(leaver);
     await expect(page.getByText("0 matches").first()).toBeVisible({ timeout: 30_000 });
-    await page.getByPlaceholder("Find someone…").fill(report);
+    await page.getByRole("searchbox", { name: "Find someone…" }).fill(report);
     await expect(page.getByText(/\d+ of \d+ match/).first()).toBeVisible({ timeout: 30_000 });
   } finally {
     // Reports first, so no delete leaves a live row pointing at a deleted manager mid-cleanup.

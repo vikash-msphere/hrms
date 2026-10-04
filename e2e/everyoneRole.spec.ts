@@ -45,7 +45,7 @@ test("granting the everyone row widens a bystander's access, and revoking it nar
 
     const sheet = admin.getByRole("dialog").filter({ hasText: "Permissions · Everyone" });
     await expect(sheet).toBeVisible({ timeout: 30_000 });
-    await sheet.getByPlaceholder("Filter collections…").fill("Letter templates");
+    await sheet.getByRole("searchbox", { name: "Filter collections…" }).fill("Letter templates");
     // `has:` page-rooted, not re-scoped from `sheet` - a has-locator carries its whole ancestor chain into
     // the containment check, so `sheet.getByRole(...)` would ask each row to contain another dialog nested
     // inside it (it never will) and silently match nothing.

@@ -44,7 +44,7 @@ test("launching at someone with no manager, who joined late and is on probation 
 
   await card.getByRole("button", { name: "Launch" }).click();
   const picker = hr.getByRole("dialog");
-  await picker.getByPlaceholder("Search name…").fill(fullName);
+  await picker.getByRole("searchbox", { name: "Search name…" }).fill(fullName);
   await picker.getByRole("checkbox").last().click();
   await picker.getByRole("button", { name: "Review and launch" }).click();
 
@@ -61,7 +61,7 @@ test("launching at someone with no manager, who joined late and is on probation 
     // for editing, so the same person has to be found and checked again.
     await preview.getByRole("button", { name: "Change who" }).click();
     await expect(picker.getByRole("checkbox").last()).not.toBeChecked();
-    await picker.getByPlaceholder("Search name…").fill(fullName);
+    await picker.getByRole("searchbox", { name: "Search name…" }).fill(fullName);
     await picker.getByRole("checkbox").last().click();
     await picker.getByRole("button", { name: "Review and launch" }).click();
     await expect(preview.getByText(`${fullName} has no manager`, { exact: false })).toBeVisible();

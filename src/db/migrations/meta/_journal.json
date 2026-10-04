@@ -71,6 +71,13 @@
       "when": 1791057624095,
       "tag": "0009_board_column_allow_create",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1791141601903,
+      "tag": "0010_search_counts",
+      "breakpoints": true
     }
   ]
 }

@@ -56,6 +56,11 @@ export function toneOf(collection: string): Tone {
   return TONE_OF[collection] ?? "admin";
 }
 
+/** Every collection of one tone - what a search category chip (CommandPalette.tsx) narrows the search to. */
+export function collectionsOfTone(tone: Tone): string[] {
+  return Object.keys(TONE_OF).filter((c) => TONE_OF[c] === tone);
+}
+
 /** The icon a record of this collection should show — borrowed from the nav item or Settings panel that owns
  *  it, so search never drifts from what the sidebar shows. */
 export function iconOf(collection: string): LucideIcon {

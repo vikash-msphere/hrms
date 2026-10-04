@@ -28,7 +28,7 @@ test("HR creates a cycle, previews the launch, and the reviewee finds their revi
   await card.getByRole("button", { name: "Launch" }).click();
   const picker = hr.getByRole("dialog");
   await expect(picker.getByRole("heading", { name: new RegExp(`Launch .${name}`) })).toBeVisible();
-  await picker.getByPlaceholder("Search name…").fill("Eve");
+  await picker.getByRole("searchbox", { name: "Search name…" }).fill("Eve");
   await picker.getByRole("checkbox").last().click();
   await picker.getByRole("button", { name: "Review and launch" }).click();
 

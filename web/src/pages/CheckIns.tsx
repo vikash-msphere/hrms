@@ -24,6 +24,7 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { SearchInput } from "@/components/common/SearchInput";
 import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Combobox } from "@/components/ui/combobox";
@@ -356,7 +357,7 @@ export default function CheckIns({ me }: { me: Me }) {
                 ))}
               <div className="relative ml-auto w-full sm:w-64">
                 <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-                <Input type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search notes and action items…" className="h-8 pl-8" />
+                <SearchInput value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search notes and action items…" className="h-8 pl-8" />
               </div>
             </div>
 

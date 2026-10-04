@@ -40,7 +40,7 @@ test("a suggested chip toggles the same pick as its own checkbox", async ({ as }
   try {
     await card.getByRole("button", { name: "Request feedback" }).click();
     const picker = manager.getByRole("dialog");
-    await expect(picker.getByPlaceholder("Search name…")).toBeVisible({ timeout: 30_000 });
+    await expect(picker.getByRole("searchbox", { name: "Search name…" })).toBeVisible({ timeout: 30_000 });
 
     // The reviewee is a seeded person in a seeded department of several - some colleague of theirs is always
     // a candidate, which is what makes this provable without staging fresh collaboration data of its own.

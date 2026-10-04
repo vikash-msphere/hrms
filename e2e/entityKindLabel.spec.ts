@@ -1,4 +1,4 @@
-import { SPA_HEADERS, gotoRoute, purge, test, expect } from "./fixtures";
+import { SPA_HEADERS, gotoRoute, purge, searchBox, searchRecordRead, test, expect } from "./fixtures";
 
 // The word a mixed result list uses for a kanban card - "Task", not "Card" and not the wire collection's own
 // name ("cards"). `lib/entityKinds.ts` exists so a result list blending a person, a settings page and a board
@@ -25,14 +25,17 @@ test("a board card in search results is labelled Task, grouped under Tasks", asy
   try {
     await gotoRoute(page, "dashboard");
     await page.keyboard.press("ControlOrMeta+k");
-    const search = page.getByPlaceholder("Search people, records, pages and settings…");
+    const search = searchBox(page);
     await expect(search).toBeVisible();
+    // The only result, so it is lit and read for the preview; let that land before the card is purged below.
+    const read = searchRecordRead(page, "cards");
     await search.fill(title);
 
     await expect(page.getByText("Tasks", { exact: true })).toBeVisible({ timeout: 30_000 });
     const result = page.getByRole("option").filter({ hasText: title }).first();
     await expect(result).toBeVisible();
     await expect(result.getByText("Task", { exact: true })).toBeVisible();
+    await read;
 
     await page.keyboard.press("Escape");
   } finally {

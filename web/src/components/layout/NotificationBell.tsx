@@ -74,11 +74,12 @@ export function NotificationBell() {
           <button
             aria-label={unread ? `Notifications (${unread} unread)` : "Notifications"}
             title="Notifications"
-            className="relative flex h-9 w-9 items-center justify-center rounded-lg border bg-card text-foreground shadow-sm transition-colors hover:bg-accent hover:text-accent-foreground"
+            className="relative flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
           >
             <Bell className={cn("h-4 w-4", pulse && "animate-bounce")} />
+            {/* Inside the button's corner, ringed in the bar's own colour so it reads as cut out of the icon. */}
             {unread > 0 && (
-              <span className={cn("absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-semibold leading-none text-primary-foreground transition-transform", pulse && "scale-125")}>
+              <span className={cn("absolute right-0.5 top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-semibold leading-none text-primary-foreground ring-2 ring-background transition-transform", pulse && "scale-125")}>
                 {unread > 99 ? "99+" : unread}
               </span>
             )}

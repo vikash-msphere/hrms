@@ -37,7 +37,7 @@ test("reissuing a tag asks first, and puts the asset back in the print queue", a
     // Name column's own filter, which lives behind the control in its header. Closed again afterwards: an
     // open popover covers the very row it filtered down to.
     await page.getByRole("button", { name: "Filter by name" }).click();
-    await page.getByPlaceholder("Search name").fill(name);
+    await page.getByRole("searchbox", { name: "Search name" }).fill(name);
     await page.keyboard.press("Escape");
     const row = page.locator("tbody tr").filter({ hasText: name }).first();
     await expect(row).toBeVisible({ timeout: 30_000 });

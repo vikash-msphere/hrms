@@ -906,9 +906,12 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
     // access is decided even for a request that spans the whole app.
     // The tab-bar badge counts ask the same question of the same collections ("what may this caller list, and
     // with what breadth"), so they ride the same map rather than a second resolve of the same verdicts.
-    // Only the search ITSELF: `search:feedback` and `search:ask` read no record, so resolving sixty collections'
-    // scopes for them would be an access_rules read spent on nothing.
-    if ((collection === "search" && pathname === "/v1/search") || collection === "activity-counts") c.set("searchScopes", await searchScopesFor(c.get("deps"), user));
+    // So do the search's per-kind totals (`search:counts`, the `in:` suggestions' numbers), which count exactly
+    // what the search would find. Only those: `search:feedback` and `search:ask` read no record, so resolving
+    // sixty collections' scopes for them would be an access_rules read spent on nothing.
+    if ((collection === "search" && (pathname === "/v1/search" || pathname === "/v1/search:counts")) || collection === "activity-counts") {
+      c.set("searchScopes", await searchScopesFor(c.get("deps"), user));
+    }
     // "What changed since I last looked" answers with collection NAMES, so it needs only the boolean half of
     // that same decision - no scope, and no per-object exception read. So does the palette's vocabulary: which
     // collections `in:` may name for this caller.

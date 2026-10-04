@@ -76,7 +76,7 @@ test.describe("deny visibility and presets", () => {
       // The org-wide grid's key is the way to a plain collection target for a collection with no page of its
       // own - which is where the presets live.
       await gotoRoute(page, "settings/permissions", "Permissions");
-      await page.getByPlaceholder("Filter collections…").fill("Pay grades");
+      await page.getByRole("searchbox", { name: "Filter collections…" }).fill("Pay grades");
       const row = page.locator("tbody tr").filter({ hasText: "Pay grades" }).first();
       await expect(row).toBeVisible({ timeout: 30_000 });
       await row.locator("td").nth(1).getByRole("button").click();

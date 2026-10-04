@@ -41,7 +41,7 @@ test.describe("the org chart", () => {
 
     // A whole name, so what is being counted is one person rather than every colleague who shares a first
     // name - the count is the assertion, and it has to mean something.
-    await page.getByPlaceholder("Find someone…").fill(employee);
+    await page.getByRole("searchbox", { name: "Find someone…" }).fill(employee);
     await expect(page.getByText(/\d+ of \d+ match/).first()).toBeVisible({ timeout: 30_000 });
     // Matches are buried in collapsed branches until the search opens them: the node itself on screen is the
     // proof that happened, not just that the counter moved.
@@ -49,11 +49,11 @@ test.describe("the org chart", () => {
 
     // Enter steps to the next match (and wraps), which is what makes a chart with several matches walkable
     // without a mouse.
-    await page.getByPlaceholder("Find someone…").press("Enter");
+    await page.getByRole("searchbox", { name: "Find someone…" }).press("Enter");
     await expect(page.getByText(/\d+ of \d+ match/).first()).toBeVisible();
 
     // A query nobody answers says so rather than drawing an empty chart.
-    await page.getByPlaceholder("Find someone…").fill("zzzz-nobody-zzzz");
+    await page.getByRole("searchbox", { name: "Find someone…" }).fill("zzzz-nobody-zzzz");
     await expect(page.getByText("0 matches").first()).toBeVisible({ timeout: 30_000 });
   });
 });

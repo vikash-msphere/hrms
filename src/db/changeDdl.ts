@@ -166,6 +166,9 @@ export const UNSTAMPED_TABLES: Record<string, string> = {
   // The FTS index. Written by the search triggers whenever a stamped row is written, so it is stamped already -
   // one hop back - and `/v1/search` is a live query that caches nothing.
   search_docs: "derived from stamped tables; search results are never stored",
+  // The index pre-counted for the `in:` totals, kept by triggers on `search_docs` - two hops back from a stamped
+  // write, and `/v1/search:counts` is a live query that caches nothing.
+  search_counts: "derived from search_docs by triggers; the per-kind totals are never stored",
   // The semantic index's bookkeeping: which `search_docs` row was embedded, for which text and which model.
   // One hop further back than the FTS index and the same argument - a row here moves only when the row it
   // describes has already been written and stamped, and nothing over the wire carries its values.

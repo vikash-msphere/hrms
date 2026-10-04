@@ -23,7 +23,7 @@ test("a revision is corrected in place and the timeline restates", async ({ as }
   // same person would be racing each other's etag (409s that neither one's own retry ever fully outlasts,
   // proven the hard way by this test and `compensationRemoveRevision` colliding on Mara together).
   await gotoRoute(page, "employees", "Directory");
-  await page.getByPlaceholder("Search people…").first().fill("Aadhya Patel");
+  await page.getByRole("searchbox", { name: "Search people…" }).first().fill("Aadhya Patel");
   await page.locator("tbody tr").filter({ hasText: "Aadhya Patel" }).first().click();
   await page.getByRole("tab", { name: /Compensation|Pay/ }).first().click();
 

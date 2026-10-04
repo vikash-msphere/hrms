@@ -1,4 +1,4 @@
-import { gotoRoute, test, expect } from "./fixtures";
+import { gotoRoute, searchBox, searchPanel, test, expect } from "./fixtures";
 
 // ⌘K obeys the same rule the sidebar does.
 //
@@ -11,20 +11,17 @@ import { gotoRoute, test, expect } from "./fixtures";
 // `test/globalSearch.test.ts` owns the server's half: which RECORDS a caller's query is allowed to match.
 // What only a browser shows is the locally-built half of the same list - and that the two are one answer to
 // one person, with no "Vendors" row leading to a wall.
-const PLACEHOLDER = "Search people, records, pages and settings…";
-
-/** The open palette: everything is asserted inside it, because the sidebar behind it says some of the same words. */
+/** The open search: everything is asserted inside it, because the sidebar beside it says some of the same words. */
 function palette(page: import("@playwright/test").Page) {
-  return page.getByRole("dialog", { name: "Search everything" });
+  return searchPanel(page);
 }
 
 /** Open it on whatever page the browser is on, and return its input. */
 async function open(page: import("@playwright/test").Page) {
   // ControlOrMeta so this is the same test on a mac laptop and a linux CI runner.
   await page.keyboard.press("ControlOrMeta+k");
-  const input = page.getByPlaceholder(PLACEHOLDER);
-  await expect(input).toBeVisible();
-  return input;
+  await expect(palette(page)).toBeVisible();
+  return searchBox(page);
 }
 
 /** A row in the palette, by the label on it. */
@@ -41,7 +38,7 @@ test.describe("what the palette offers", () => {
     const input = await open(page);
     await input.fill("vendors");
     // Grouped, which is what keeps a mixed list of pages, people and records readable.
-    await expect(palette(page).getByText("Go to", { exact: true })).toBeVisible({ timeout: 30_000 });
+    await expect(palette(page).getByRole("group", { name: "Pages" })).toBeVisible({ timeout: 30_000 });
     await expect(row(page, "Vendors").first()).toBeVisible();
 
     // A settings panel is its own kind of destination, grouped apart from the pages - and it is the kind an
@@ -78,9 +75,9 @@ test.describe("what the palette offers", () => {
     await input.fill("my leave");
     await expect(row(page, "Leave: My Leave").first()).toBeVisible({ timeout: 30_000 });
 
-    // And Escape closes it, from the input where the focus is - the press somebody makes when they opened the
-    // palette by accident, or changed their mind after reading the rows.
+    // And Escape puts the results away, from the input where the focus is - the press somebody makes when they
+    // opened the search by accident, or changed their mind after reading the rows.
     await input.press("Escape");
-    await expect(input).toBeHidden();
+    await expect(palette(page)).toHaveCount(0);
   });
 });

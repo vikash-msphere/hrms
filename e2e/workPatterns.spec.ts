@@ -87,7 +87,7 @@ test("a part-time schedule is defined, assigned from the roster, and decides tha
   await page.getByRole("button", { name: "Assign a schedule" }).click();
   const assign = page.getByRole("dialog");
   await assign.getByRole("radio", { name: new RegExp(patternName) }).click();
-  await assign.getByPlaceholder("Search people").fill(person);
+  await assign.getByRole("searchbox", { name: "Search people" }).fill(person);
   // By NAME, not `.first()`: the end-date toggle is a checkbox in this dialog too, and it comes first.
   await assign.getByRole("checkbox", { name: person }).check();
   await assign.getByRole("button", { name: /^Assign/ }).click();

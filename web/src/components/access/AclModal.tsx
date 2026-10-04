@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
+import { SearchInput } from "@/components/common/SearchInput";
 import { Combobox } from "@/components/ui/combobox";
 import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
@@ -1033,7 +1034,7 @@ export function AclModal({
                 Per-user access on {scopeNote}. {verbMode ? "A custom method is denied unless explicitly allowed; a deny always wins." : "A deny always wins."}
                 {!verbMode && !createMode && " Levels nest: read ⊂ write ⊂ full (full = delete + purge)."}
               </p>
-              {userShown.length > 8 && <Input className="h-8" placeholder="Filter by name or email…" value={userFilter} onChange={(e) => setUserFilter(e.target.value)} />}
+              {userShown.length > 8 && <SearchInput className="h-8" placeholder="Filter by name or email…" value={userFilter} onChange={(e) => setUserFilter(e.target.value)} />}
               <div className="space-y-2">
                 {userShown.length === 0 && <p className="text-sm text-muted-foreground">No per-user rules here.</p>}
                 {userShown.length > 0 && shownUserRules.length === 0 && <p className="text-sm text-muted-foreground">No rule matches "{userFilter}".</p>}
@@ -1228,7 +1229,7 @@ export function AclModal({
                   <Button variant="ghost" size="sm" className="h-7" onClick={() => setAddExpires("")}>Clear</Button>
                 )}
               </div>
-              {sortedRoles.length > 8 && <Input className="h-8" placeholder="Filter roles…" value={roleFilter} onChange={(e) => setRoleFilter(e.target.value)} />}
+              {sortedRoles.length > 8 && <SearchInput className="h-8" placeholder="Filter roles…" value={roleFilter} onChange={(e) => setRoleFilter(e.target.value)} />}
               <div className="space-y-2">
                 {sortedRoles.length > 0 && shownRoles.length === 0 && <p className="text-sm text-muted-foreground">No role matches "{roleFilter}".</p>}
                 {rolePaged.pageItems.map((role) => {

@@ -14,7 +14,7 @@ export function LockButton({ mac }: { mac: boolean }) {
       onClick={() => (enabled ? void lockNow() : openAppLockSettings({ setup: true }))}
       aria-label={enabled ? "Lock" : "Set up app lock"}
       title={label}
-      className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border bg-card text-foreground shadow-sm transition-colors hover:bg-accent hover:text-accent-foreground"
+      className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
     >
       <Lock className="h-4 w-4" />
     </button>

@@ -17,7 +17,7 @@ import { FilterChip } from "@/components/common/FilterChips";
 import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { SearchInput } from "@/components/common/SearchInput";
 import { AccessAction } from "@/components/access/AccessAction";
 import { Card } from "@/components/ui/card";
 import { WriteDialog } from "@/components/common/WriteDialog";
@@ -245,7 +245,7 @@ function RulesTab({ canWrite, openId }: { canWrite: boolean; openId?: string }) 
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <div className="relative min-w-[12rem] flex-1">
           <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-          <Input type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search rules…" className="pl-8" />
+          <SearchInput value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search rules…" className="pl-8" />
         </div>
         <div className="flex items-center gap-0.5 rounded-lg bg-muted p-0.5">
           {filterBtn("all", `All ${rows.length}`)}

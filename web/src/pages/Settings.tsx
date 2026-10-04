@@ -85,6 +85,7 @@ const PunctualityPolicyPanel = lazy(() => import("@/settings/PunctualityPolicyPa
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { SearchInput } from "@/components/common/SearchInput";
 import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 import { CONFIGURABLE_QUICK_ACTIONS, normalizeQuickMenu, type QuickMenuGroup } from "@/lib/quickActions";
@@ -331,7 +332,7 @@ function SettingsHub({ me }: { me: Me }) {
       <PageHeader title="Settings" description="Everything about how the app works for your org. Search to find any setting." />
       <div className="relative mb-6 max-w-xl">
         <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-        <Input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder='Search settings - try "leave", "logo", "tax", "roles"…' className="h-11 rounded-xl pl-9" />
+        <SearchInput autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder='Search settings - try "leave", "logo", "tax", "roles"…' className="h-11 rounded-xl pl-9" />
       </div>
 
       {/* Setup checklist: only while something's missing, and only the bits this caller can actually fix. */}
@@ -438,9 +439,11 @@ function SettingsPanel({ me, entry, toast, openId }: { me: Me; entry: SettingsEn
           >
             <ArrowLeft className="h-3.5 w-3.5" /> All settings
           </button>
+          {/* A fallback for `/`: it sits beside every section, so a section's own search box takes the key and
+              this one only gets it on a section that has none. */}
           <div className="relative">
             <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-            <Input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search settings…" className="h-8 rounded-md pl-8 text-sm" />
+            <SearchInput slashFallback value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search settings…" className="h-8 rounded-md pl-8 text-sm" />
           </div>
           {matches
             ? matches.length === 0
@@ -3157,7 +3160,7 @@ function AudienceCell({ value, roles, employees, defaultLabel = "Everyone", onCh
         </div>
         <div className="p-2">
           <p className="mb-1.5 px-1 text-xs font-medium text-muted-foreground">Specific people</p>
-          <Input type="search" className="mb-1.5 h-8" placeholder="Search people…" value={q} onChange={(e) => setQ(e.target.value)} />
+          <SearchInput className="mb-1.5 h-8" placeholder="Search people…" value={q} onChange={(e) => setQ(e.target.value)} />
           <div className="max-h-48 space-y-0.5 overflow-y-auto">
             {filtered.map((e) => {
               const id = idOf(e.path);

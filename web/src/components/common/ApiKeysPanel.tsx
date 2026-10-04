@@ -15,6 +15,7 @@ import { BLANK } from "@/lib/tableFilter";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { SearchInput } from "@/components/common/SearchInput";
 import { Textarea } from "@/components/ui/textarea";
 import { Field } from "@/components/common/Field";
 import { ActivitySection } from "@/components/common/ActivitySection";
@@ -645,7 +646,7 @@ export function ApiKeysPanel({ controlsSlot }: { controlsSlot?: HTMLElement | nu
                   {/* Sixty checkboxes is a wall to scroll, and the one collection the integration needs is
                       somewhere in it. Filtering by name, plus a whole-module toggle, is how a scope gets
                       picked in two actions instead of twenty. */}
-                  <Input className="h-8" placeholder="Filter collections…" value={colFilter} onChange={(e) => setColFilter(e.target.value)} />
+                  <SearchInput className="h-8" placeholder="Filter collections…" value={colFilter} onChange={(e) => setColFilter(e.target.value)} />
                   <div className="max-h-56 space-y-2 overflow-y-auto rounded-md border p-2">
                     {shownGroups.map(([label, cols]) => {
                       const all = cols.every((c) => draft.collections.includes(c));

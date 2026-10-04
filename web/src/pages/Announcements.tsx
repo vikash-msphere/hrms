@@ -9,6 +9,7 @@ import { useInfiniteScroll } from "@/hooks/useInfiniteScroll";
 import { useMedia } from "@/hooks/useMedia";
 import { usePermission } from "@/lib/perm";
 import { useIntent } from "@/lib/intent";
+import { SearchInput } from "@/components/common/SearchInput";
 import { useKudosLevels, useKudosCategories } from "@/lib/kudosLevels";
 import { cn, colorFromString, formatDate, formatDateTime, idOf, relativeFuture } from "@/lib/utils";
 import { stampDay, todayStr, thisMonthStr } from "@/lib/orgDay";
@@ -35,7 +36,6 @@ import { useMentions } from "@/components/common/MentionPicker";
 import { useDeepOpen } from "@/hooks/useDeepOpen";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { AccessAction } from "@/components/access/AccessAction";
@@ -704,8 +704,8 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
   }, [searching, authorFilter, employees, needle]);
 
   // Keyboard walk of the feed, the way a reader app does it: j / k move a cursor down and up (scrolling it into
-  // view), Enter unfolds the post under the cursor, "/" jumps to the search box. Typing surfaces and open
-  // dialogs keep their keys. `o` is deliberately NOT bound - it is the tail of the shell's `g o` chord.
+  // view), Enter unfolds the post under the cursor ("/" jumps to the search box, as it does on every page).
+  // Typing surfaces and open dialogs keep their keys. `o` is deliberately NOT bound - it is the tail of the shell's `g o` chord.
   const [cursor, setCursor] = useState(-1);
   useEffect(() => setCursor(-1), [filter, authorFilter, needle]);
   useEffect(() => {
@@ -714,7 +714,6 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
       const el = e.target as HTMLElement | null;
       if (el && (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || el.isContentEditable)) return;
       if (document.querySelector('[role="dialog"][data-state="open"]')) return;
-      if (e.key === "/") { e.preventDefault(); searchRef.current?.focus(); return; }
       if ((e.key === "j" || e.key === "k") && visibleFeed.length) {
         e.preventDefault();
         const at = cursor < 0 ? (e.key === "j" ? -1 : 0) : cursor;
@@ -957,8 +956,7 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
           category, kind); below that it filters the loaded window on what the card shows. */}
       <div className={side ? "relative w-full" : "relative mr-1 w-full sm:w-64"}>
         <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" aria-hidden />
-        <Input
-          type="search"
+        <SearchInput
           ref={searchRef}
           value={q}
           onChange={(e) => setQ(e.target.value)}

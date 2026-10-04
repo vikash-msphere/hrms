@@ -94,7 +94,7 @@ test("an employee files leave and their manager decides it", async ({ as }) => {
   // table's rows open a detail panel.
   // This employee's OWN pending row, found by the reason typed into it: several specs share this person, so
   // "exactly one pending request" is a fact about the suite rather than about the app.
-  await employee.getByPlaceholder(/Search all records/).fill(reason);
+  await employee.getByRole("searchbox", { name: "Search all records" }).fill(reason);
   await expect(employee.locator("tbody tr").filter({ hasText: /Pending/ })).toHaveCount(1);
 
   // The manager's queue grew by exactly this one, and it is the employee's. A reload, not a navigation: the
@@ -122,7 +122,7 @@ test("an employee files leave and their manager decides it", async ({ as }) => {
     await employee.reload();
     await expect(employee.getByRole("main")).toBeVisible();
     await employee.getByRole("tab", { name: /^Requests/ }).click();
-    await employee.getByPlaceholder(/Search all records/).fill(reason);
+    await employee.getByRole("searchbox", { name: "Search all records" }).fill(reason);
     await expect(employee.locator("tbody tr").filter({ hasText: /Approved/ })).toHaveCount(1, { timeout: 10_000 });
     await expect(employee.locator("tbody tr").filter({ hasText: /Pending/ })).toHaveCount(0, { timeout: 10_000 });
   }).toPass({ timeout: 60_000 });

@@ -36,7 +36,7 @@ test("a rule is edited from the rules list: new level and expiry, one rule left"
     // The org holds hundreds of rules and other specs write more while this runs, so the row is reached
     // through the Rule column's own filter rather than hoped for on the first page.
     await page.getByRole("button", { name: "Filter by rule" }).first().click();
-    await page.getByPlaceholder("Search rule").fill(label);
+    await page.getByRole("searchbox", { name: "Search rule" }).fill(label);
     await page.keyboard.press("Escape");
     const row = page.locator("tbody tr").filter({ hasText: label });
     await expect(row).toHaveCount(1, { timeout: 30_000 });

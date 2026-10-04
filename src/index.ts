@@ -105,6 +105,7 @@ import { employeeTrackedFrom } from "./routes/employeeTrackedFrom";
 import { batch } from "./routes/batch";
 import { search, searchAsk, searchFeedback } from "./routes/search";
 import { searchVocabularyRoute } from "./routes/searchVocabulary";
+import { searchCountsRoute } from "./routes/searchCounts";
 import { activityCountsRoute } from "./routes/activityCounts";
 import { changes } from "./routes/changes";
 import { dashboardSummaryRoute } from "./routes/dashboardSummary";
@@ -289,6 +290,7 @@ app.route("/v1/batch:run", batch); // multi-read batch: re-dispatches GET sub-re
 app.route("/v1/search:feedback", searchFeedback); // which result was opened, counted (services/searchInsights.ts)
 app.route("/v1/search:ask", searchAsk); // a question routed to where in the app it is answered (services/searchAsk.ts)
 app.route("/v1/search:vocabulary", searchVocabularyRoute); // the collections and status values ⌘K suggests after in: / status:
+app.route("/v1/search:counts", searchCountsRoute); // how many records of each kind the caller can search, for in:'s ranking
 app.route("/v1/search", search); // cross-collection search: per-collection list decision + scope inside the service
 app.route("/v1/dashboard-summary", dashboardSummaryRoute); // aggregated KPI counts: same per-collection gating as search
 app.route("/v1/attention", attentionRoute); // "what needs me": derived trouble across goals/cards/reviews, same gating

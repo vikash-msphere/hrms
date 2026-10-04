@@ -34,7 +34,7 @@ test("HR adds an employee, and a person captures their own bank details", async 
   await expect(hr.getByRole("dialog")).toHaveCount(0);
 
   // On the directory, and their profile carries the ID the org assigned - not blank, and not typed in.
-  await hr.getByPlaceholder("Search people…").fill(last);
+  await hr.getByRole("searchbox", { name: "Search people…" }).fill(last);
   const row = hr.locator("tbody tr").filter({ hasText: last });
   await expect(row).toHaveCount(1);
   await row.click();

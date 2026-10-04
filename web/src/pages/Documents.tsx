@@ -52,6 +52,7 @@ import { Button } from "@/components/ui/button";
 import { AccessAction } from "@/components/access/AccessAction";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { SearchInput } from "@/components/common/SearchInput";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Combobox } from "@/components/ui/combobox";
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -1321,7 +1322,7 @@ function AckProgressDialog({ doc, employees, departments, onClose }: { doc: Docu
             </div>
 
             {active.length > 8 && (
-              <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter by name…" className="h-8" />
+              <SearchInput value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter by name…" className="h-8" />
             )}
 
             <div>

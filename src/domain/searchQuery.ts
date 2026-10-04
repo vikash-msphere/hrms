@@ -171,11 +171,14 @@ export function startOfPeriod(raw: string, tz: string): number | null {
 }
 
 /**
- * Whether `text` (lower-case) still contains every term, by any of its spellings - the question the field gate
- * in globalSearch.ts asks of a hit when the caller may not read every column it could have matched on.
+ * Whether `text` still contains every term, by any of its spellings - the question the field gate in
+ * globalSearch.ts asks of a hit when the caller may not read every column it could have matched on.
  * Substring, deliberately the permissive side of FTS's prefix match: a hit kept here is one whose visible text
- * explains it anyway.
+ * explains it anyway. Compared as words, split exactly as the index splits them, because the index matched
+ * "team outing" in "Team-outing" and "team\nouting": compared as raw text, a phrase spelling never matched
+ * there and the hit was dropped.
  */
 export function explains(text: string, terms: QueryTerm[]): boolean {
-  return terms.every((t) => [t.typed, ...t.alternatives].some((spelling) => text.includes(spelling.join(" "))));
+  const said = words(text).join(" ");
+  return terms.every((t) => [t.typed, ...t.alternatives].some((spelling) => said.includes(spelling.join(" "))));
 }
