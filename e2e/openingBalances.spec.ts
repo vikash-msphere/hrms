@@ -264,7 +264,7 @@ test("the leave page shows a brought-over balance, HR's adjustment, and imported
 
     // ---- HR takes it back out, and nothing is refunded ----
     await hr.getByRole("tab", { name: /^History/ }).click();
-    await hr.getByPlaceholder("Search all records…").fill(marker);
+    await hr.getByRole("searchbox", { name: "Search all records" }).fill(marker);
     const hrRow = hr.getByRole("tabpanel").getByRole("button", { name: /Before HRMS/ }).filter({ hasText: person.name });
     await hrRow.getByRole("button", { name: "Remove", exact: true }).click();
     const confirmRemove = hr.getByRole("dialog");

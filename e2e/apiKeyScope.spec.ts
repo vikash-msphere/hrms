@@ -35,7 +35,7 @@ test("a key minted through the form is limited to exactly what the form said", a
   await form.getByLabel("Access level").click();
   await page.getByRole("option", { name: "Read & write" }).click();
   await form.getByLabel("Every collection").uncheck();
-  await form.getByPlaceholder("Filter collections…").fill("Vendors");
+  await form.getByRole("searchbox", { name: "Filter collections…" }).fill("Vendors");
   // The picker's rows are labels wrapping their checkbox, so the row itself is the control to press.
   await form.locator("label").filter({ hasText: /^Vendors$/ }).first().click();
   await expect(form.getByLabel(/Allow actions/), "actions are meant to be off unless asked for").not.toBeChecked();

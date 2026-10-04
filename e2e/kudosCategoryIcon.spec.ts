@@ -37,17 +37,17 @@ test("a category's icon is found by search, picked, and reads back as picked aft
       await row.getByPlaceholder("Category name (e.g. Teamwork)").fill(name);
 
       await row.getByRole("button", { name: "Pick icon" }).click();
-      await page.getByPlaceholder("Search icons…").fill("rocket");
+      await page.getByRole("searchbox", { name: "Search icons…" }).fill("rocket");
       // The search actually narrowed the grid - not "rocket is in there somewhere among all of them".
       await expect(page.locator("div.grid button")).toHaveCount(1);
       await expect(rocket).toBeVisible();
       await rocket.click();
-      await expect(page.getByPlaceholder("Search icons…")).toHaveCount(0); // the popover closed on pick
+      await expect(page.getByRole("searchbox", { name: "Search icons…" })).toHaveCount(0); // the popover closed on pick
 
       // Reopened, the SAME trigger shows rocket as the one already chosen - proof the pick landed on this
       // row's own state, not merely that the popover closed without erroring.
       await row.getByRole("button", { name: "Pick icon" }).click();
-      await page.getByPlaceholder("Search icons…").fill("rocket");
+      await page.getByRole("searchbox", { name: "Search icons…" }).fill("rocket");
       await expect(rocket).toHaveClass(/ring-primary/);
       await page.keyboard.press("Escape");
 
@@ -72,7 +72,7 @@ test("a category's icon is found by search, picked, and reads back as picked aft
       }
       if (!savedRow) throw new Error(`e2e: the category "${name}" is not in the saved config`);
       await savedRow.getByRole("button", { name: "Pick icon" }).click();
-      await page.getByPlaceholder("Search icons…").fill("rocket");
+      await page.getByRole("searchbox", { name: "Search icons…" }).fill("rocket");
       await expect(rocket).toHaveClass(/ring-primary/, { timeout: 5_000 });
       await page.keyboard.press("Escape");
     }).toPass({ timeout: 150_000 });

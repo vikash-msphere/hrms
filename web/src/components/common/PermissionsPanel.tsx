@@ -23,7 +23,7 @@ import { DataTable, type Column } from "@/components/common/DataTable";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { SearchInput } from "@/components/common/SearchInput";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/components/ui/use-toast";
 import type { User } from "@/types";
@@ -862,7 +862,7 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
           <div className="space-y-3">
             {matrixNote}
             <div className="flex flex-wrap items-center gap-2">
-              <Input className="h-8 max-w-xs" placeholder="Filter collections…" value={matrixFilter} onChange={(e) => setMatrixFilter(e.target.value)} />
+              <SearchInput className="h-8 max-w-xs" placeholder="Filter collections…" value={matrixFilter} onChange={(e) => setMatrixFilter(e.target.value)} />
               <Button size="sm" variant={onlySet ? "default" : "outline"} className="h-8" aria-pressed={onlySet} onClick={() => setOnlySet((s) => !s)}>
                 Only rows with access
               </Button>

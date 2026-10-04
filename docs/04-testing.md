@@ -165,7 +165,7 @@ suite, where it is cheaper and stricter, and is deliberately not re-asserted her
 | `writeDialog` | a create appears in the table without the page reloading (proved by a marker on the live JS context, which a document load would destroy) and survives one; and a lost race says so in the form and lets the second press through |
 | `approval` | a decision verb really opens its confirmation, backing out really abandons it, and approving settles the row out of the queue |
 | `leaveTwoRoles` | two people, two browsers, one request: the employee files it, their manager finds it in their own queue and decides it, and the employee's page tells the truth afterwards |
-| `search` | `⌘K` opens, typing reaches the index (a seeded person, not just the static page list), and Enter lands on what was picked |
+| `search` | `⌘K` opens the search - the top bar's field with its drop-down where the bar has room, the modal palette where it does not (both found by `searchBox` / `searchPanel` in fixtures.ts) - typing reaches the index (a seeded person, not just the static page list), and Enter lands on what was picked |
 | `export` | CSV and xlsx are really built in the browser and handed over - the Excel path lazy-imports SheetJS, so the bytes are the only proof the chunk loads |
 | `letterPdf` | a generated letter comes back through the blob/`<a download>` chain as a file that starts `%PDF-` |
 | `kanban` | a card moves column through its actions menu and is still there after a reload |

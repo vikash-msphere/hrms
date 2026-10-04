@@ -19,7 +19,7 @@ import { ActivitySection } from "@/components/common/ActivitySection";
 import { PageSettings } from "@/components/common/SettingsButton";
 import { AccessAction } from "@/components/access/AccessAction";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { SearchInput } from "@/components/common/SearchInput";
 import { exportTable } from "@/lib/exportTable";
 import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
@@ -807,7 +807,7 @@ function SightedPanel({ rows, empName, reconstructed, truncated, isOpen, filter,
           ) : (
             <>
               <div className="flex flex-wrap items-center gap-2">
-                <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter by tag, name or holder…" className="h-8 max-w-xs" />
+                <SearchInput value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter by tag, name or holder…" className="h-8 max-w-xs" />
                 {byHand > 0 && (
                   <FilterChip on={filter === "hand"} onClick={() => onFilter(filter === "hand" ? "all" : "hand")}>Hand-ticked only ({byHand})</FilterChip>
                 )}
@@ -880,7 +880,7 @@ function MissingPanel({ rows, empName, isOpen, filter, onFilter, open, onOpenCha
           ) : (
             <>
               <div className="flex flex-wrap items-center gap-2">
-                <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter by tag, name or holder…" className="h-8 max-w-xs" />
+                <SearchInput value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter by tag, name or holder…" className="h-8 max-w-xs" />
                 {!isOpen && turnedUp > 0 && (
                   <FilterChip on={filter === "still"} onClick={() => onFilter(filter === "still" ? "all" : "still")}>Still missing only ({still})</FilterChip>
                 )}

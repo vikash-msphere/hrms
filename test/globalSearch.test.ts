@@ -713,6 +713,23 @@ describe("ranking and query understanding", () => {
     }
   });
 
+  it("finds a multi-word synonym however the record separates its words, for a caller with a field deny", async () => {
+    // The deny sends every ticket hit through the field gate's re-check, which must split the readable text into
+    // words as the index did: "Team-outing" and "Team  outing" are the phrase "team outing" to the index.
+    const viewer = await seedPerson("04-z01", "Root", "Admin", { levels: { "**": "admin" }, allow: ["**"], deny: ["tickets.*.description.**"] });
+    await ticketFor(viewer, "04-z01-t1", "Offsite planning");
+    await ticketFor(viewer, "04-z01-t2", "Team-outing budget");
+    await ticketFor(viewer, "04-z01-t3", "Team  outing, again");
+    await deps.db.insert(schema.settings).values({ key: "search-synonyms", value: JSON.stringify({ groups: [["team outing", "offsite"]] }) });
+    try {
+      const all = ["Offsite planning", "Team-outing budget", "Team  outing, again"].sort();
+      expect((await search(viewer, "Team Outing")).map((h) => h.title).sort()).toEqual(all);
+      expect((await search(viewer, "offsite")).map((h) => h.title).sort()).toEqual(all);
+    } finally {
+      await deps.db.delete(schema.settings).where(eq(schema.settings.key, "search-synonyms"));
+    }
+  });
+
   it("ranks a word in the title above the same word in the body", async () => {
     const admin = await seedPerson("04-z01", "Root", "Admin", ADMIN_GRANT, "super_admin");
     // Body-only match inserted first, so insertion order would put it on top.

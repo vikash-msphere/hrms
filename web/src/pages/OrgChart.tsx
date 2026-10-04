@@ -20,7 +20,7 @@ import { EmptyState } from "@/components/common/EmptyState";
 import { CardsSkeleton } from "@/components/common/Skeletons";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { SearchInput } from "@/components/common/SearchInput";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
 import { CopyEmail } from "@/components/common/CopyEmail";
@@ -763,7 +763,7 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
             </div>
             <div className="relative">
               <Search className="pointer-events-none absolute left-2 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-              <Input value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") stepMatch(e.shiftKey ? -1 : 1); }} placeholder="Find someone…" className="h-9 w-48 pl-8" />
+              <SearchInput value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") stepMatch(e.shiftKey ? -1 : 1); }} placeholder="Find someone…" className="h-9 w-48 pl-8" />
             </div>
             {myId && <Button size="sm" variant="outline" className="h-9" onClick={() => locate(myId)} title="Find me in the chart"><LocateFixed className="h-4 w-4" /> Me</Button>}
           </div>
@@ -951,7 +951,7 @@ function MovePicker({ title, description, subjectLabel, currentLabel, topLevelLa
         <p className="-mt-1 flex flex-wrap items-baseline gap-1.5 text-sm text-muted-foreground">
           Moving <span className="font-medium text-foreground">{subjectLabel}</span>, currently under <span className="font-medium text-foreground">{currentLabel}</span>.
         </p>
-        <Input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search…" autoFocus />
+        <SearchInput value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search…" autoFocus />
         <div className="max-h-72 space-y-1 overflow-y-auto">
           <button type="button" onClick={() => onPick(null)} className="flex w-full items-center gap-2 rounded-md border px-3 py-2 text-left text-sm hover:bg-accent">
             <ArrowUpToLine className="h-4 w-4 text-muted-foreground" /> {topLevelLabel}

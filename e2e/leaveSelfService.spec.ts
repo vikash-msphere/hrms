@@ -62,7 +62,7 @@ test("an employee moves a filed request, and the new form arrives pre-filled", a
     // Searched first, then matched on the date. The search reaches the whole collection - this employee's
     // list is long by the time a full lane has been filing leave for them all run - while the date is what
     // makes the row unmistakably this request, whatever the debounced search is showing at that instant.
-    const box = requester.getByPlaceholder(/Search all records/);
+    const box = requester.getByRole("searchbox", { name: "Search all records" });
     if (await box.waitFor({ state: "visible", timeout: 10_000 }).then(() => true).catch(() => false)) {
       await box.fill(reason);
     }
@@ -110,7 +110,7 @@ test("an employee moves a filed request, and the new form arrives pre-filled", a
   await requester.getByRole("tab", { name: /^History/ }).click();
   // Found through the page's own server-side search rather than by reading the table: the reason column is
   // hidden by default, and the search reaches the whole collection rather than the first page of it.
-  await requester.getByPlaceholder(/Search all records/).fill(reason);
+  await requester.getByRole("searchbox", { name: "Search all records" }).fill(reason);
   // Asserted on a CANCELLED row among the matches rather than on "exactly one row": the search is a full-text
   // one, so a retried attempt's reason (same words, different suffix) matches too - and every attempt this
   // spec made ends cancelled, which is the fact being checked.

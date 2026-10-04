@@ -543,6 +543,30 @@ export function toast(page: Page, text: string | RegExp) {
 }
 
 /**
+ * The global search box, wherever ⌘K put it: the field in the top bar when the bar has room for it (the
+ * `desktop` and `wide` projects), the modal palette's box when it does not (`phone`). Both are the combobox
+ * named "Search everything", and only one is ever on screen.
+ */
+export function searchBox(page: Page) {
+  return page.getByRole("combobox", { name: "Search everything" });
+}
+
+/** The open search's results surface - the field's drop-down or the palette dialog (CommandPalette.tsx). */
+export function searchPanel(page: Page) {
+  return page.locator("[data-search-panel]");
+}
+
+/**
+ * The search's read of a lit result's record (CommandPalette.tsx `readRecord` - for its preview pane and its
+ * decisions), as a promise to await. Start it BEFORE the typing that lights the row, and await it before
+ * deleting that record in a `finally`: a read that lands after the purge is a 404, which the browser logs and
+ * this harness fails on, though the search itself shrugs it off.
+ */
+export function searchRecordRead(page: Page, collection: string) {
+  return page.waitForResponse((r) => r.request().method() === "GET" && new URL(r.url()).pathname.startsWith(`/v1/${collection}/`));
+}
+
+/**
  * Answer the prompt every delete puts up (`useSoftDelete`, and the pages that delete by hand): the dialog
  * titled "Delete …?", pressed through on its own button. `label` is that button when a page names it
  * differently ("Delete task", "Remove").

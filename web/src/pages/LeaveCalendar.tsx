@@ -36,7 +36,7 @@ import { DayPanel } from "@/components/calendar/DayPanel";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Input } from "@/components/ui/input";
+import { SearchInput } from "@/components/common/SearchInput";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Skeleton } from "@/components/ui/skeleton";
 import { DataState } from "@/components/common/DataState";
@@ -493,7 +493,7 @@ export default function LeaveCalendar({ me }: { me: Me }) {
               <div className="flex flex-wrap items-center gap-2 border-b p-3" data-print-hide>
                 <div className="relative min-w-[10rem] flex-1 sm:max-w-xs">
                   <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                  <Input
+                  <SearchInput
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
                     placeholder="Find a person"

@@ -113,7 +113,7 @@ export const COLLECTION_METHODS: Readonly<Record<string, readonly string[]>> = {
   "people-analytics": ["narrate"],
   "personal-documents": ["generateLetter", "previewLetter"],
   reviews: ["draft"],
-  search: ["ask", "feedback", "vocabulary"],
+  search: ["ask", "counts", "feedback", "vocabulary"],
   suggestions: ["draft"],
   "table-fields": ["describe"],
 };

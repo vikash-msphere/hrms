@@ -3930,6 +3930,27 @@ export const searchDocs = sqliteTable("search_docs", {
   createdIdx: index("search_docs_created_idx").on(t.createdAt),
 }));
 
+// How many live `search_docs` rows there are, grouped by everything search visibility tests and nothing else:
+// the collection, the code with its last (record) segment taken off, the owner, and `restricted`. The search's
+// `in:` suggestions show each kind's total (services/globalSearch.ts searchKindCounts) by running the SAME
+// scope predicate over these rows that the search runs over `search_docs` - but a count of the index itself
+// reads every row the caller can see (`search_docs` has no index the scope can use), while this is a few rows
+// per kind per owner. Every grant names a code above a record's own segment, so the parent code answers the
+// subtree test exactly; per-record shares and denies cannot be answered here, and a kind with any is left out.
+// Kept in step by triggers on `search_docs` and filled once from it (migration 0010); `''` rather than NULL for a
+// missing code or owner, because NULLs in a primary key are all distinct to SQLite.
+export const searchCounts = sqliteTable("search_counts", {
+  collection: text("collection").notNull(),
+  parentCode: text("parent_code").notNull().default(""),
+  ownerId: text("owner_id").notNull().default(""),
+  restricted: integer("restricted", { mode: "boolean" }).notNull().default(false),
+  n: integer("n").notNull().default(0),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.collection, t.parentCode, t.ownerId, t.restricted] }),
+  // The "own" breadth: a caller's own rows across every kind, without walking the rest.
+  ownerIdx: index("search_counts_owner_idx").on(t.ownerId),
+}));
+
 // How ⌘K is used, as DAILY COUNTERS - never a log of who searched for what. One row per (day, kind, label),
 // incremented in place, so the table holds at most a few hundred rows a day however busy the palette is, and
 // nothing in it names a person. services/searchInsights.ts is the only writer.

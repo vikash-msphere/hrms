@@ -98,3 +98,16 @@ export function collectionsNamed(word: string, collections: readonly string[]): 
     || (w.length >= 3 && (n.startsWith(w) || n.replace(/-/g, "").startsWith(flat)));
   return collections.filter((c) => namesOf(c).some(names));
 }
+
+/**
+ * The word to write `collection` as after `in:` - what the search's suggestions put in the box. Its user-facing
+ * name (`tasks`, not the wire name `cards`) whenever that word names `collection` ALONE among `collections`, by
+ * the same rule the server reads it with (`collectionsNamed`); the wire name only where the plain name would
+ * be ambiguous. The box keeps the person's own vocabulary: a suggestion that turned the `in:tasks` they typed
+ * into `in:cards` taught them a word the app never shows anywhere else.
+ */
+export function inWordOf(collection: string, collections: readonly string[]): string {
+  const word = nameSlug(entityLabel(collection));
+  const named = collectionsNamed(word, collections);
+  return named.length === 1 && named[0] === collection ? word : collection;
+}

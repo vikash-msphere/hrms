@@ -4,12 +4,12 @@ import { idOf } from "@/lib/utils";
 import { navigate } from "@/router";
 import { fireIntent } from "@/lib/intent";
 import { useConfirm } from "@/components/common/confirm";
-import { DEFAULT_SCHEDULE, type AttendanceSchedule } from "@/lib/attendance";
+import { DEFAULT_SCHEDULE, orgDaysWindow, type AttendanceSchedule } from "@/lib/attendance";
 import { useToast } from "@/components/ui/use-toast";
 import type { AttendanceSession, Me } from "@/types";
 import { getSetting } from "@/lib/settingsStore";
 import { subscribeInvalidations } from "@/lib/resourceStore";
-import { setOrgTimezone } from "@/lib/orgDay";
+import { setOrgTimezone, todayStr } from "@/lib/orgDay";
 import { hasCapability } from "@/lib/perm";
 
 // Every session matching a query, following the server cursor: a list page is capped at 100 rows, and an
@@ -55,13 +55,17 @@ export type ClockState = {
   sched: AttendanceSchedule;
   openSessions: AttendanceSession[];
   mine?: AttendanceSession;
+  // While on the clock: the minutes the caller's CLOSED sessions today (the org-local day) add up to - what was
+  // worked before this session, the breaks between sessions left out. Added to the open session's elapsed time,
+  // it is the day's total so far (the top bar's clock chip). Null while it is being read, and while off the clock.
+  workedToday: number | null;
   busy: boolean;
   punch: (verb: "clockIn" | "clockOut") => Promise<void>;
   reload: () => Promise<void>;
 };
 
 const EMPTY: ClockState = {
-  enabled: false, ready: true, sched: DEFAULT_SCHEDULE, openSessions: [], busy: false,
+  enabled: false, ready: true, sched: DEFAULT_SCHEDULE, openSessions: [], workedToday: null, busy: false,
   punch: async () => {}, reload: async () => {},
 };
 const ClockContext = createContext<ClockState>(EMPTY);
@@ -148,13 +152,44 @@ function ActiveProvider({ me, children }: { me: Me; children: ReactNode }) {
   }, [reload, toast, me.employee_id, canRequestRemote, confirm]);
 
   const mine = useMemo(() => openSessions.find((s) => s.employee && idOf(s.employee) === me.employee_id), [openSessions, me.employee_id]);
+
+  // Today's closed sessions, totalled - read only while on the clock, since that is the only time anything shows
+  // it, and again whenever a new session opens (`mine.clock_in`): a clock-out closed one, so the total moved.
+  // ONE small read of the caller's own sessions in today's window, the same org-local day (`orgDaysWindow`) and
+  // the same sum of closed sessions the Attendance page's "worked today" makes, so the two never disagree.
+  const [workedToday, setWorkedToday] = useState<number | null>(null);
+  const openedAt = mine?.clock_in;
+  useEffect(() => {
+    if (!openedAt || !me.employee_id) {
+      setWorkedToday(null);
+      return;
+    }
+    let live = true;
+    const today = todayStr();
+    const query = `attendance?${orgDaysWindow(today, today, sched.timezone)}&employee=${encodeURIComponent(`employees/${me.employee_id}`)}`;
+    listAllSessions(query)
+      .then((sessions) => {
+        if (!live) return;
+        const closed = sessions.filter((s) => s.clock_out && s.clock_in !== openedAt);
+        setWorkedToday(closed.reduce((sum, s) => sum + Math.max(0, Math.round((+new Date(s.clock_out!) - +new Date(s.clock_in)) / 60000)), 0));
+      })
+      // Unread, the day's earlier sessions count as none rather than hiding the clock: the time on screen is then
+      // this session's, which is still true of today.
+      .catch(() => live && setWorkedToday(0));
+    return () => {
+      live = false;
+    };
+  }, [openedAt, me.employee_id, sched.timezone]);
   // `enabled` is about PUNCHING: it needs an employee record to open a session for AND the verb that opens
   // it. A caller without either can still see who is on the clock (the directory's presence dots), which is
   // org data, not personal - so the open-session read happens either way, and the top bar simply offers them
   // no button rather than one that 403s.
   const canPunch = hasCapability(me.capabilities, "attendance.clockIn");
   const enabled = Boolean(me.employee_id) && canPunch;
-  const value = useMemo<ClockState>(() => ({ enabled, ready, sched, openSessions, mine, busy, punch, reload }), [enabled, ready, sched, openSessions, mine, busy, punch, reload]);
+  const value = useMemo<ClockState>(
+    () => ({ enabled, ready, sched, openSessions, mine, workedToday, busy, punch, reload }),
+    [enabled, ready, sched, openSessions, mine, workedToday, busy, punch, reload],
+  );
   return <ClockContext.Provider value={value}>{children}</ClockContext.Provider>;
 }
 

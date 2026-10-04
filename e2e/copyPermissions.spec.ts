@@ -81,7 +81,7 @@ test("copies one role's rules onto another and shows the whole copy as one act",
     // unrelated permission changes.
     await gotoRoute(page, "activity", "Activity");
     await page.getByRole("button", { name: "Permission changes" }).click();
-    const search = page.getByPlaceholder(/Search action, person or record/);
+    const search = page.getByRole("searchbox", { name: /Search action, person or record/ });
     await search.fill(dst);
     await search.press("Enter");
 

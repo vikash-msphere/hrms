@@ -12,7 +12,7 @@ import { BASE_COLLECTIONS } from "@/components/access/permMatrix";
 import { PhotoAvatar } from "./PhotoAvatar";
 import { PersonAvatar } from "./PersonAvatar";
 import { CardsSkeleton } from "@/components/common/Skeletons";
-import { Input } from "@/components/ui/input";
+import { SearchInput } from "@/components/common/SearchInput";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -600,7 +600,7 @@ export function ActivityFeed({ resource, global = false, initialEntity, apiKey, 
           <button type="button" aria-label="Search" onClick={() => setSubmittedQ(q)} className="absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground">
             <Search className="h-3.5 w-3.5" />
           </button>
-          <Input value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") setSubmittedQ(q); }} placeholder={global ? "Search action, person or record… (Enter)" : "Search activity or record… (Enter)"} className="h-8 pl-7" />
+          <SearchInput value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") setSubmittedQ(q); }} placeholder={global ? "Search action, person or record… (Enter)" : "Search activity or record… (Enter)"} className="h-8 pl-7" />
         </div>
         {global && (
           <Select value={entity} onValueChange={setEntity}>

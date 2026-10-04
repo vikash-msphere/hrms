@@ -31,7 +31,14 @@ test.describe("the org chart", () => {
     await row(page, child).getByTitle(/^Move/).click();
     const picker = page.getByRole("dialog");
     await expect(picker.getByRole("heading", { name: "Change parent department" })).toBeVisible();
-    await picker.getByPlaceholder("Search…").fill(parentName);
+    // An open dialog owns `/`: it reaches the dialog's search box, not the chart's "Find someone…" behind it,
+    // and that box is the one that names the key.
+    const search = picker.getByRole("searchbox", { name: "Search…" });
+    await expect(search).toHaveAttribute("placeholder", "Search (/)…");
+    await picker.getByRole("heading", { name: "Change parent department" }).click();
+    await page.keyboard.press("/");
+    await expect(search).toBeFocused();
+    await search.fill(parentName);
     // A candidate button carries its secondary line too, so match on the name being IN it rather than being
     // the whole of it.
     await picker.getByRole("button", { name: new RegExp(parentName) }).click();
@@ -70,7 +77,7 @@ test.describe("the org chart", () => {
     // tree the browser assembled from what this caller may read, so nowhere else can check it.
     await row(page, parent).getByTitle(/^Move/).click();
     const picker = page.getByRole("dialog");
-    await picker.getByPlaceholder("Search…").fill(childName);
+    await picker.getByRole("searchbox", { name: "Search…" }).fill(childName);
     await expect(picker.getByText("No matches.")).toBeVisible();
 
     // And the escape hatch it does offer really is offered: "top level" is always a legal destination.

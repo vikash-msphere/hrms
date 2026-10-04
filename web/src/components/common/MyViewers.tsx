@@ -3,7 +3,7 @@ import { ChevronRight, ChevronsDownUp, ChevronsUpDown, Eye, Pencil, ShieldCheck,
 import { invoke } from "@/api";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Input } from "@/components/ui/input";
+import { SearchInput } from "@/components/common/SearchInput";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Sheet, SheetContent, SheetHeader, SheetBody, SheetTitle, SheetDescription } from "@/components/ui/sheet";
@@ -165,7 +165,7 @@ export function MyViewers({ selfPath }: { selfPath: string }) {
                 <div className="flex flex-wrap items-center gap-2">
                   <div className="relative min-w-[9rem] flex-1">
                     <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-                    <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Find an area" className="h-8 pl-8 text-xs" />
+                    <SearchInput value={q} onChange={(e) => setQ(e.target.value)} placeholder="Find an area" className="h-8 pl-8 text-xs" />
                   </div>
                   {groups.length > 0 && (
                     <button

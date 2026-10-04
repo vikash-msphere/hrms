@@ -3,7 +3,7 @@ import { Search } from "lucide-react";
 import { idOf } from "@/lib/utils";
 import type { Department, Employee } from "@/types";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { SearchInput } from "@/components/common/SearchInput";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -66,7 +66,7 @@ export function EmployeePicker({ title, confirmLabel, employees, departments, ex
           </Select>
           <div className="relative flex-1">
             <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-            <Input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search name…" className="h-9 pl-8" />
+            <SearchInput value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search name…" className="h-9 pl-8" />
           </div>
         </div>
         {suggestedRows.length > 0 && (

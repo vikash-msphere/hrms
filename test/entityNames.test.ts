@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { collectionsNamed, entityLabel, entityLabelSingular, namesOf } from "../src/domain/entityNames";
+import { collectionsNamed, entityLabel, entityLabelSingular, inWordOf, namesOf } from "../src/domain/entityNames";
 import { SEARCH_INDEX } from "../src/domain/searchIndex";
 
 const all = SEARCH_INDEX.map((e) => e.collection);
@@ -35,6 +35,31 @@ describe("collectionsNamed", () => {
       expect(collectionsNamed(entityLabel(c), all), `${c} by "${entityLabel(c)}"`).toContain(c);
       expect(collectionsNamed(entityLabelSingular(c), all), `${c} by "${entityLabelSingular(c)}"`).toContain(c);
       expect(namesOf(c)).toContain(c);
+    }
+  });
+});
+
+describe("inWordOf", () => {
+  it("writes a kind with the name the app shows for it, not its wire name", () => {
+    expect(inWordOf("cards", all)).toBe("tasks");
+    expect(inWordOf("automations", all)).toBe(entityLabel("automations").toLowerCase().replace(/[^a-z0-9]+/g, "-"));
+    expect(inWordOf("leave-requests", all)).toBe("leave-requests");
+  });
+
+  it("keeps the wire name where the shown name would also name another kind", () => {
+    // "documents" names company AND personal documents, so company documents keep their own word.
+    expect(collectionsNamed(inWordOf("org-documents", all), all)).toEqual(["org-documents"]);
+  });
+
+  it("writes every searchable collection with a word that names it, and never more than its wire name does", () => {
+    // What a suggestion puts in the box has to read back as the kind that was picked. A few wire names already
+    // name more than one kind by their start (`attendance` takes attendance corrections too); the shown name is
+    // only ever used where it is no wider than that.
+    for (const c of all) {
+      const word = inWordOf(c, all);
+      const reads = collectionsNamed(word, all);
+      expect(reads, `${c} as "${word}"`).toContain(c);
+      expect(reads.length, `${c} as "${word}"`).toBeLessThanOrEqual(collectionsNamed(c, all).length);
     }
   });
 });

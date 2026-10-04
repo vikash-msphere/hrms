@@ -19,7 +19,7 @@ test("a revision is removed, and the previous one resumes as the timeline restat
   const added = 1_500_000 + (Date.now() % 400) * 1000;
 
   await gotoRoute(page, "employees", "Directory");
-  await page.getByPlaceholder("Search people…").first().fill("Mara");
+  await page.getByRole("searchbox", { name: "Search people…" }).first().fill("Mara");
   await page.locator("tbody tr").filter({ hasText: "Mara Manager" }).first().click();
   await page.getByRole("tab", { name: /Compensation|Pay/ }).first().click();
   await page.getByRole("button", { name: "Annual", exact: true }).click();

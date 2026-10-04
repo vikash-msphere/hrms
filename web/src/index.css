@@ -308,7 +308,7 @@
            the page sits just below it so a card lifts off without glowing. Body text on a card is 12:1;
            muted text holds 5:1 even on the muted fill. */
     --night-100: 0 0% 90.2%;       /* #E6E6E6 - body text */
-    --night-400: 223 12% 68%;      /* #A4A9B7 - muted text */
+    --night-400: 223 12% 72%;      /* #AFB4C0 - muted text */
     --night-600: 223 12% 35.5%;    /* #505665 - inputs */
     --night-700: 223 15% 27.2%;    /* #3B4150 - borders */
     --night-750: 223 17% 23.2%;    /* #313745 - muted fill */

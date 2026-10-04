@@ -22,7 +22,7 @@
 // cannot be kept that way - as a word it would ASK for what it means to leave out - so it marks the query
 // `incomplete` and nothing is sent until it names one person.
 
-import { collectionsNamed } from "../../../src/domain/entityNames";
+import { collectionsNamed, inWordOf } from "../../../src/domain/entityNames";
 
 export type PalettePerson = { id: string; first: string; last: string };
 export type PaletteDepartment = { name: string };
@@ -280,6 +280,8 @@ export function applySuggestion(raw: string, span: { start: number; end: number 
 
 /** The collections an `in:` word names - the server's own rule (src/domain/entityNames.ts), not a copy of it. */
 export const collectionsNamedBy = collectionsNamed;
+/** The word to write a collection as after `in:` - its own name where that is unambiguous (entityNames.ts). */
+export { inWordOf };
 
 // A typed value matches an option at its start, or at the start of any of its words (`prog` finds `in_progress`,
 // `req` finds `leave-requests` and "Leave requests").
@@ -349,10 +351,12 @@ export function suggestFilters<P extends PalettePerson>(
   } else if (key === "in") {
     const vocab = ctx.vocabulary ?? [];
     const named = new Set([...others.in, ...others.notIn].flatMap((w) => collectionsNamedBy(w, vocab.map((v) => v.collection))));
+    // Written with the kind's own name (`in:tasks`), not its wire name (`in:cards`) - see inWordOf.
+    const all = vocab.map((v) => v.collection);
     items = vocab
       .filter((v) => !named.has(v.collection) && matches(typed, v.collection, ctx.labelOf(v.collection)))
       .sort((a, b) => ctx.labelOf(a.collection).localeCompare(ctx.labelOf(b.collection)))
-      .map((v) => ({ kind: "in" as const, token: `${sign}in:${v.collection}`, collection: v.collection, ...not }));
+      .map((v) => ({ kind: "in" as const, token: `${sign}in:${inWordOf(v.collection, all)}`, collection: v.collection, ...not }));
   } else if (key === "status") {
     // Narrowed by `in:` already, only those collections' statuses; otherwise every status any collection has.
     const vocab = ctx.vocabulary ?? [];
@@ -427,7 +431,10 @@ export function suggestFilters<P extends PalettePerson>(
   // `@priyanka`): offering anything would make Enter complete what is complete instead of opening the result the
   // person is looking at.
   if (!items.length || items.some((s) => s.token === word)) return null;
-  return { start: span.start, end: span.end, items: items.slice(0, limit) };
+  // Every kind for `in:`, not the first `limit` of them: its offers are chips in a row that scrolls, ranked by
+  // the palette by how much each kind holds (CommandPalette.tsx) - which this module does not know - so cutting
+  // here would cut alphabetically, and the kinds that hold the most went unoffered.
+  return { start: span.start, end: span.end, items: key === "in" ? items : items.slice(0, limit) };
 }
 
 /**

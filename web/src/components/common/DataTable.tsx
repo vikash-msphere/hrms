@@ -21,6 +21,7 @@ import { exportTable } from "@/lib/exportTable";
 import { useCollectionHasMore } from "@/hooks/useCollection";
 import { syncLastUrl } from "@/router";
 import { useMedia } from "@/hooks/useMedia";
+import { SearchInput } from "@/components/common/SearchInput";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { useToast } from "@/components/ui/use-toast";
 import { BLANK, filterChipLabel, matchesFilter, numberStats, type FilterKind } from "@/lib/tableFilter";
@@ -34,12 +35,6 @@ const PAGE_SIZES = [10, 25, 50, 100, 0]; // 0 = All
 
 /** Joins column ids into one comparable key. A character no column id can contain, so the key is unambiguous. */
 const ID_SEP = String.fromCharCode(0);
-
-// Which table's search box `/` reaches. A page can hold several tables (tabs that render all their panels,
-// a page with a sub-table), and every one of them listening for `/` would race to steal the same keystroke.
-// The FIRST one mounted owns the key for as long as it is mounted, which on a tabbed page is the tab that
-// was open first - and the shortcut sheet only ever promised one search box per page.
-const slashOwners: symbol[] = [];
 
 /** The next focusable row in `dir`, stepping over group headers and anything else that cannot take focus. */
 function focusSiblingRow(from: HTMLElement, dir: 1 | -1): void {
@@ -1026,7 +1021,7 @@ export function DataTable<T>({
     }
     return (
       <div className="flex items-center gap-1.5">
-        <Input
+        <SearchInput
           autoFocus
           value={value}
           placeholder={`Search ${col.header.toLowerCase()}`}
@@ -1307,47 +1302,17 @@ export function DataTable<T>({
   // different jobs and compose: this one asks the server for matching records across the WHOLE collection
   // (so it reaches rows past the first page, which a column filter cannot), and the column filters then
   // narrow whatever came back. Only rendered when the page wires it up.
-  // `/` puts the cursor in this table's search box - the shortcut the help sheet already advertises as
-  // "search within the page", which until now only the feed implemented.
-  const searchRef = React.useRef<HTMLInputElement | null>(null);
-  const hasSearch = !!search;
-  const slashToken = React.useRef<symbol>(Symbol("table-search"));
-  React.useEffect(() => {
-    if (!hasSearch) return;
-    const token = slashToken.current;
-    slashOwners.push(token);
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey) return;
-      if (slashOwners[0] !== token) return;
-      const t = e.target as HTMLElement | null;
-      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)) return;
-      // An open overlay owns the keyboard, exactly as the global shortcut layer treats it.
-      if (document.querySelector('[role="dialog"][data-state="open"], [role="listbox"][data-state="open"], [role="menu"][data-state="open"]')) return;
-      e.preventDefault();
-      searchRef.current?.focus();
-      searchRef.current?.select();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      const at = slashOwners.indexOf(token);
-      if (at >= 0) slashOwners.splice(at, 1);
-    };
-  }, [hasSearch]);
-
   const searchControl = search && (
     // Full width on a phone: search is the main way to find a row when the table is a card list, and a 208px
     // box next to nothing looks (and reads) like an afterthought.
     <div className="relative w-full sm:w-auto">
       <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-      <Input
-        ref={searchRef}
-        type="search"
+      <SearchInput
         value={search.value}
         onChange={(e) => search.onChange(e.target.value)}
         placeholder={search.placeholder ?? "Search all records…"}
         aria-label={search.placeholder ?? "Search all records"}
-        className="h-9 w-full pl-8 pr-7 sm:w-52"
+        className="h-9 w-full pl-8 pr-7 sm:w-56"
       />
       {search.value && (
         <button

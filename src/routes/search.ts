@@ -42,9 +42,12 @@ import { orgTimezone } from "../services/orgDay";
 export const search = new Hono<AppEnv>().get("/", async (c) => {
   const user = c.get("user")!;
   const q = c.req.query("q") ?? "";
-  const list = (name: string) => (c.req.query(name) ?? "").split(",").map((s) => s.trim()).filter(Boolean).slice(0, 12);
-  const collections = list("in");
-  const notCollections = list("notin");
+  const list = (name: string, max = 12) => (c.req.query(name) ?? "").split(",").map((s) => s.trim()).filter(Boolean).slice(0, max);
+  // Collections take more: a search category chip (CommandPalette.tsx) narrows to every collection of one
+  // kind, and "Money" alone is fifteen. 64 covers the whole searchable set, and a name the caller may not
+  // search is dropped by `collectionsNamed`, so a longer list can only ever narrow.
+  const collections = list("in", 64);
+  const notCollections = list("notin", 64);
   const refId = (ref: string | undefined) => (ref?.startsWith("employees/") ? ref.split("/").pop() : undefined);
   // A caller with no employee record owns nothing, so `mine` for them matches nothing rather than everything.
   const ownerId = c.req.query("mine") === "1" ? (user.employeeId ?? "-") : refId(c.req.query("owner"));
@@ -104,6 +107,9 @@ export const search = new Hono<AppEnv>().get("/", async (c) => {
       collection: h.collection,
       title: h.title,
       subtitle: h.subtitle,
+      // When the record was created, for grouping newest-first results by day (the palette). Absent on the few
+      // index rows written before the column existed.
+      ...(h.createdAt != null ? { create_time: new Date(h.createdAt).toISOString() } : {}),
       ...(h.related ? { related: true } : {}),
     })),
   });

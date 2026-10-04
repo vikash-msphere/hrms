@@ -21,6 +21,7 @@ import { useKpiFocus } from "@/lib/kpiFocus";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { SearchInput } from "@/components/common/SearchInput";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { WriteDialog } from "@/components/common/WriteDialog";
@@ -154,7 +155,7 @@ export default function Candidates({ me }: { me: Me }) {
         {rows.length > 0 && (
           <div className="relative mb-4 max-w-sm">
             <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-            <Input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search the whole pool…" className="h-9 pl-8" />
+            <SearchInput value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search the whole pool…" className="h-9 pl-8" />
             {/* Two characters is where the server's FTS filter starts (services/searchFilter.ts); below that
                 the box is not searching anything, so it says so rather than appearing to have matched all. */}
             {q.trim().length === 1 && <p className="mt-1 text-xs text-muted-foreground">Type one more character to search.</p>}

@@ -4,7 +4,7 @@ import { create, invoke, remove } from "@/api";
 import { usePermission } from "@/lib/perm";
 import { ruleScopeFor, ruleMatchesTarget } from "./accessRuleScope";
 import { type AccessRule, CELL, labelOf, fetchAllAccessRules, collectionsForRules, groupOf, COLLECTION_GROUPS, accessTone } from "./permMatrix";
-import { Input } from "@/components/ui/input";
+import { SearchInput } from "@/components/common/SearchInput";
 import { Button } from "@/components/ui/button";
 import { roleLabel } from "@/lib/roles";
 import { CellOption } from "./CellOption";
@@ -274,7 +274,7 @@ export function SubjectPermissionsDialog({
             </p>
             <p className="mb-2 text-xs text-muted-foreground">Collection-wide access. Finer scope (own/department, fields, custom methods, single objects) is on the "All rules" tab and the in-context manage-access icons.</p>
             <div className="mb-2 flex flex-wrap items-center gap-2">
-              <Input className="h-8 min-w-[10rem] flex-1" placeholder="Filter collections…" value={filter} onChange={(e) => setFilter(e.target.value)} />
+              <SearchInput className="h-8 min-w-[10rem] flex-1" placeholder="Filter collections…" value={filter} onChange={(e) => setFilter(e.target.value)} />
               <Button type="button" variant={onlyGranted ? "default" : "outline"} size="sm" className="h-8" onClick={() => setOnlyGranted((s) => !s)} aria-pressed={onlyGranted}>
                 Only what's set
               </Button>

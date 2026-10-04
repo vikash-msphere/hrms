@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HRMS Top Navbar — 1a</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#1e212b;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",sans-serif;color:#e6e8ee;-webkit-font-smoothing:antialiased}
+button{font-family:inherit;cursor:pointer}
+.nav{height:64px;display:flex;align-items:center;gap:16px;padding:0 20px;border-bottom:1px solid #2c3040}
+.search{width:340px;max-width:40vw;height:36px;display:flex;align-items:center;gap:10px;padding:0 8px 0 12px;background:#232733;border:1px solid #333848;border-radius:8px;cursor:text}
+.search:hover{border-color:#454b5e}
+.search input{flex:1;min-width:0;background:none;border:none;outline:none;color:#e6e8ee;font:inherit;font-size:13px}
+.search input::placeholder{color:#7d8394}
+.kbd{font-size:11px;color:#9aa0ae;background:#2b3040;border:1px solid #3a4052;border-radius:4px;padding:2px 6px}
+.spacer{flex:1}
+.clockin{height:36px;display:flex;align-items:center;gap:8px;padding:0 14px;background:#7fb2e5;color:#11151c;border:none;border-radius:8px;font-size:13px;font-weight:600}
+.clockin:hover{background:#94c0eb}
+.onclock{height:36px;display:none;align-items:center;gap:10px;padding:0 4px 0 12px;background:#1f2a24;border:1px solid #2f4a3a;border-radius:8px}
+.dot{width:7px;height:7px;border-radius:50%;background:#58b880}
+.time{font-size:13px;font-weight:600;font-variant-numeric:tabular-nums;color:#cfeedd}
+.clockout{height:28px;padding:0 10px;background:transparent;color:#cfeedd;border:none;border-radius:6px;font-size:13px}
+.clockout:hover{background:#2a3a31}
+.sep{width:1px;height:24px;background:#333848}
+.icons{display:flex;align-items:center;gap:4px}
+.icon{width:36px;height:36px;display:grid;place-items:center;background:transparent;border:none;border-radius:8px;color:#b4b9c6;position:relative}
+.icon:hover{background:#2a2e3b;color:#e6e8ee}
+.badge{position:absolute;top:5px;right:4px;min-width:16px;height:16px;padding:0 4px;border-radius:8px;background:#7fb2e5;color:#11151c;font-size:10px;font-weight:700;display:grid;place-items:center;border:2px solid #1e212b}
+.new-wrap{position:relative}
+.new{height:36px;display:flex;align-items:center;gap:6px;padding:0 10px;background:#232733;color:#e6e8ee;border:1px solid #333848;border-radius:8px;font-size:13px;font-weight:500}
+.new:hover{border-color:#454b5e}
+.menu{position:absolute;top:44px;right:0;width:220px;padding:6px;background:#262a36;border:1px solid #363b4a;border-radius:10px;box-shadow:0 12px 32px rgba(0,0,0,.4);display:none;flex-direction:column;gap:2px;z-index:5}
+.menu.open{display:flex}
+.item{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-radius:6px;font-size:13px;cursor:pointer}
+.item:hover{background:#313646}
+.item span:last-child{font-size:11px;color:#7d8394}
+.account{display:flex;align-items:center;gap:6px;padding:2px;background:transparent;border:none;border-radius:20px}
+.account:hover{background:#2a2e3b}
+.avatar{width:32px;height:32px;border-radius:50%;background:#c0902a;color:#fff;font-size:12px;font-weight:700;display:grid;place-items:center}
+</style>
+</head>
+<body>
+<header class="nav">
+  <label class="search">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#9aa0ae" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><path d="m21 21-4.3-4.3"></path></svg>
+    <input id="search" type="text" placeholder="Search anything">
+    <span class="kbd">⌘K</span>
+  </label>
+  <div class="spacer"></div>
+  <button class="clockin" id="clockin">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"></path><polyline points="10 17 15 12 10 7"></polyline><line x1="15" x2="3" y1="12" y2="12"></line></svg>
+    Clock in
+  </button>
+  <div class="onclock" id="onclock">
+    <span class="dot"></span>
+    <span class="time" id="time">00:00:00</span>
+    <button class="clockout" id="clockout">Clock out</button>
+  </div>
+  <div class="sep"></div>
+  <div class="icons">
+    <button class="icon" title="Help"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="m4.93 4.93 4.24 4.24"></path><path d="m14.83 9.17 4.24-4.24"></path><path d="m14.83 14.83 4.24 4.24"></path><path d="m9.17 14.83-4.24 4.24"></path><circle cx="12" cy="12" r="4"></circle></svg></button>
+    <button class="icon" title="Lock"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg></button>
+    <button class="icon" title="Notifications"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"></path><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"></path></svg><span class="badge">4</span></button>
+  </div>
+  <div class="new-wrap">
+    <button class="new" id="new">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"></path><path d="M12 5v14"></path></svg>New
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#9aa0ae" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"></path></svg>
+    </button>
+    <div class="menu" id="menu">
+      <div class="item"><span>Leave request</span><span>L</span></div>
+      <div class="item"><span>Expense claim</span><span>E</span></div>
+      <div class="item"><span>Add employee</span><span>N</span></div>
+    </div>
+  </div>
+  <button class="account" title="Account">
+    <span class="avatar">SS</span>
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#9aa0ae" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px"><path d="m6 9 6 6 6-6"></path></svg>
+  </button>
+</header>
+<script>
+const $ = id => document.getElementById(id);
+let start = null, timer = null;
+const pad = n => String(n).padStart(2, '0');
+function tick() {
+  const s = Math.floor((Date.now() - start) / 1000);
+  $('time').textContent = `${pad(Math.floor(s / 3600))}:${pad(Math.floor(s / 60) % 60)}:${pad(s % 60)}`;
+}
+$('clockin').onclick = () => {
+  start = Date.now(); tick(); timer = setInterval(tick, 1000);
+  $('clockin').style.display = 'none'; $('onclock').style.display = 'flex';
+};
+$('clockout').onclick = () => {
+  clearInterval(timer); start = null;
+  $('onclock').style.display = 'none'; $('clockin').style.display = 'flex';
+};
+$('new').onclick = e => { e.stopPropagation(); $('menu').classList.toggle('open'); };
+document.addEventListener('click', () => $('menu').classList.remove('open'));
+document.addEventListener('keydown', e => {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); $('search').focus(); }
+  if (e.key === 'Escape') $('menu').classList.remove('open');
+});
+</script>
+</body>
+</html>

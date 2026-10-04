@@ -67,17 +67,38 @@ test.describe("every setting", () => {
 
     // The hub search reads titles, descriptions AND the keyword synonyms in the registry - which is the half
     // that makes it findable by what people actually call things.
-    await page.getByPlaceholder(/Search settings/).fill("aadhaar");
+    await page.getByRole("searchbox", { name: /Search settings/ }).fill("aadhaar");
     await expect(page.getByText("Employee identity fields")).toBeVisible();
 
-    await page.getByPlaceholder(/Search settings/).fill("zzzz no such setting");
+    await page.getByRole("searchbox", { name: /Search settings/ }).fill("zzzz no such setting");
     await expect(page.getByText("No settings match")).toBeVisible();
+  });
+
+  test("`/` reaches a section's own search box before the rail's, and the rail's when the section has none", async ({ as }) => {
+    const page = await as("super");
+    const rail = page.getByRole("searchbox", { name: "Search settings…" });
+
+    // A section with a search of its own: that box names the key and takes it, the rail beside it does not.
+    await gotoRoute(page, "settings/permissions", "Permissions");
+    const own = page.getByRole("searchbox", { name: "Filter collections…" });
+    await expect(own).toHaveAttribute("placeholder", "Filter (/) collections…", { timeout: 30_000 });
+    await expect(rail).toHaveAttribute("placeholder", "Search settings…");
+    await page.getByRole("main").click({ position: { x: 4, y: 4 } });
+    await page.keyboard.press("/");
+    await expect(own).toBeFocused();
+
+    // A section without one: the rail is the page's only search box, so it is the one.
+    await gotoRoute(page, "settings/identity");
+    await expect(rail).toHaveAttribute("placeholder", "Search (/) settings…", { timeout: 30_000 });
+    await page.getByRole("main").click({ position: { x: 4, y: 4 } });
+    await page.keyboard.press("/");
+    await expect(rail).toBeFocused();
   });
 
   test("a caller without settings access gets the wall, not the hub", async ({ as }) => {
     const page = await as("employee");
     await gotoRoute(page, "settings");
     await expect(page.getByText("Restricted").or(page.getByText("You don't have access to this")).first()).toBeVisible();
-    await expect(page.getByPlaceholder(/Search settings/)).toHaveCount(0);
+    await expect(page.getByRole("searchbox", { name: /Search settings/ })).toHaveCount(0);
   });
 });

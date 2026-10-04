@@ -16,6 +16,7 @@ import { useConfirm } from "@/components/common/confirm";
 import { PanelSkeleton } from "@/components/common/Skeletons";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { SearchInput } from "@/components/common/SearchInput";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -723,7 +724,7 @@ function PrinterBody({ me, assets, onClose, onReload, initialAssetIds, tagSettin
             <TabsContent value="add" className="mt-0 flex min-h-0 flex-1 flex-col p-4 pt-3">
             <div className="relative">
               <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-              <Input type="search" className="pl-8" placeholder="Search tag, name, serial…" value={search} onChange={(e) => setSearch(e.target.value)} />
+              <SearchInput className="pl-8" placeholder="Search tag, name, serial…" value={search} onChange={(e) => setSearch(e.target.value)} />
             </div>
             <div className="mt-2 flex gap-2">
               <Select value={catFilter} onValueChange={setCatFilter}>

@@ -24,7 +24,7 @@ test("a level is set from the matrix, reads back, and the cell's key opens that 
 
   try {
     await gotoRoute(page, "settings/permissions", "Permissions");
-    await page.getByPlaceholder("Filter collections…").fill("Letter templates");
+    await page.getByRole("searchbox", { name: "Filter collections…" }).fill("Letter templates");
 
     // The role's own cell, found by its accessible name ("<role> · <collection>") rather than by column
     // index: other specs create and delete roles concurrently, and the grid re-reads the roles after every
@@ -51,7 +51,7 @@ test("a level is set from the matrix, reads back, and the cell's key opens that 
     await expect(editor.getByRole("heading", { name: /Manage access · Letter templates/ })).toBeVisible({ timeout: 30_000 });
     // And it opens on the same rule the cell just wrote, seen from the other surface.
     await editor.getByRole("tab", { name: /^Roles/ }).click();
-    const filter = editor.getByPlaceholder("Filter roles…");
+    const filter = editor.getByRole("searchbox", { name: "Filter roles…" });
     if (await filter.count()) await filter.fill(label);
     await expect(editor.getByText(label).first()).toBeVisible({ timeout: 30_000 });
     await page.keyboard.press("Escape");
@@ -94,7 +94,7 @@ test("a section header sets a level on every collection shown under it, and read
 
   try {
     await gotoRoute(page, "settings/permissions", "Permissions");
-    await page.getByPlaceholder("Filter collections…").fill("letter");
+    await page.getByRole("searchbox", { name: "Filter collections…" }).fill("letter");
     // Cells by accessible name, not column index: see the first test.
     await expect(page.getByRole("columnheader", { name: label })).toBeVisible({ timeout: 30_000 });
     const groupLevel = page.getByRole("combobox", { name: `${label} · all ${group}`, exact: true });

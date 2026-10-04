@@ -17,6 +17,7 @@ import type { LeaveType } from "@/types";
 import { todayStr } from "@/lib/orgDay";
 import { Field, FieldRow } from "@/components/common/Field";
 import { Input } from "@/components/ui/input";
+import { SearchInput } from "@/components/common/SearchInput";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -1134,7 +1135,7 @@ export function RestrictionsEditor({
       {/* FIND A RULE BY NAME. Forty rules across nine sections, and which section owns a rule is a guess until
           you have learned the layout - "blackout" is Notice & timing, "half days" is Request shape. */}
       <div className="flex flex-wrap items-center gap-2">
-        <Input
+        <SearchInput
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Find a rule…"

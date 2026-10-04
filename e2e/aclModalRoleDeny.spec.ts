@@ -28,7 +28,7 @@ test("a role is denied access to a collection through the Manage access editor, 
     await editor.getByRole("tab", { name: /^Roles/ }).click();
 
     // Found by its own unique label, not by position - the role list is real seeded roles plus this one.
-    const filter = editor.getByPlaceholder("Filter roles…");
+    const filter = editor.getByRole("searchbox", { name: "Filter roles…" });
     if (await filter.count()) await filter.fill(label);
     // `has:` must be page-rooted, not re-scoped from `editor` - a has-locator carries its WHOLE chain into the
     // containment check, so `editor.getByRole(...)` here would ask each row to contain another `role=dialog`

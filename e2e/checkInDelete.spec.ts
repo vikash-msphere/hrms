@@ -38,7 +38,7 @@ test("a 1:1 is deleted from its own card", async ({ as }) => {
       const card = page.getByRole("button").filter({ hasText: notes }).first();
       await expect(async () => {
         await gotoRoute(page, "check-ins", "1:1s");
-        await page.getByPlaceholder("Search notes and action items…").fill(notes);
+        await page.getByRole("searchbox", { name: "Search notes and action items…" }).fill(notes);
         await expect(card).toBeVisible({ timeout: 8_000 });
       }).toPass({ timeout: 40_000 });
       await card.click();

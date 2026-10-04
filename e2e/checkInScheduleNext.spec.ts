@@ -43,7 +43,7 @@ test("scheduling the next 1:1 carries the unfinished items and leaves the done o
     // Searched for rather than scrolled to: past 1:1s are shown a handful at a time, and a meeting a week old
     // sits behind that cutoff as soon as this person has had a few. Searching lifts the cutoff and matches on
     // action-item text, which is what makes this run's meeting findable at all.
-    await page.getByPlaceholder("Search notes and action items…").fill(carried);
+    await page.getByRole("searchbox", { name: "Search notes and action items…" }).fill(carried);
     // The collapsed card counts the open items ("1 open") rather than listing them, so the meeting has to be
     // unfolded before its checklist - and the "Schedule next" affordance beside it - are on screen at all.
     const card = page.getByRole("button").filter({ hasText: "Raised by the schedule-next spec." }).first();

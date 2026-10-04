@@ -1,4 +1,4 @@
-import { gotoRoute, test, expect, makeThrowawayPerson, retireThrowawayPerson, allowConsoleErrors } from "./fixtures";
+import { gotoRoute, test, expect, makeThrowawayPerson, retireThrowawayPerson, allowConsoleErrors, searchBox } from "./fixtures";
 
 // The phone, measured rather than reasoned about.
 //
@@ -232,5 +232,27 @@ test.describe("phone", () => {
     } finally {
       await retireThrowawayPerson(admin, person.path);
     }
+  });
+
+  // The search on a phone is the modal, with its own box and phone-size text: the filter words drawn behind it
+  // (CommandPalette.tsx QueryHighlight) have to line up with ITS text, as they do with the top bar field's.
+  test("the search's filter words line up with the text in the phone's search box", async ({ as }) => {
+    const page = await as("super");
+    await gotoRoute(page, "dashboard");
+    await page.getByRole("banner").getByRole("button", { name: "Search", exact: true }).tap();
+    const search = searchBox(page);
+    await search.fill("laptop in:leave-requests ");
+    await expect(page.locator("[data-query-highlight]")).toHaveCount(1);
+    const widths = await search.evaluate((input: HTMLInputElement) => {
+      const drawn = input.parentElement!.querySelector("[data-query-highlight] > div")!;
+      const range = document.createRange();
+      range.selectNodeContents(drawn);
+      const ctx = document.createElement("canvas").getContext("2d")!;
+      // From its parts: Chrome serialises the `font` shorthand as "" when it cannot express every part.
+      const cs = getComputedStyle(input);
+      ctx.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+      return { drawn: range.getBoundingClientRect().width, typed: ctx.measureText(input.value).width };
+    });
+    expect(Math.abs(widths.drawn - widths.typed)).toBeLessThanOrEqual(1);
   });
 });

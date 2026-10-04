@@ -35,6 +35,7 @@ import { useDeepOpen } from "@/hooks/useDeepOpen";
 import { AccessScope } from "@/components/access/AccessScope";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { SearchInput } from "@/components/common/SearchInput";
 import { AccessAction } from "@/components/access/AccessAction";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList } from "@/components/ui/tabs";
@@ -1099,7 +1100,7 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
             <div className="flex flex-col gap-2">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 {items.length > 8 ? (
-                  <Input placeholder="Find an employee…" value={itemQuery} onChange={(e) => setItemQuery(e.target.value)} className="max-w-xs" />
+                  <SearchInput placeholder="Find an employee…" value={itemQuery} onChange={(e) => setItemQuery(e.target.value)} className="max-w-xs" />
                 ) : <span />}
                 {/* "Compare with November 2026" is a single nowrap label wider than a phone's content
                     column on its own, and it shares this row with two more controls. */}

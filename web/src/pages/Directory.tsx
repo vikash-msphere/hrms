@@ -32,6 +32,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { AccessAction } from "@/components/access/AccessAction";
 import { Input } from "@/components/ui/input";
+import { SearchInput } from "@/components/common/SearchInput";
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover";
 import { WriteDialog } from "@/components/common/WriteDialog";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
@@ -898,7 +899,7 @@ export default function Directory({ me }: { me: Me }) {
               <div>
                 <div className="relative mb-3 max-w-sm">
                   <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                  <Input type="search" value={search} onChange={(ev) => setSearch(ev.target.value)} placeholder="Search people…" className="pl-8" />
+                  <SearchInput value={search} onChange={(ev) => setSearch(ev.target.value)} placeholder="Search people…" className="pl-8" />
                 </div>
                 {gridRows.length === 0 ? (
                   <div className="rounded-xl border bg-card py-12 text-center text-sm text-muted-foreground">{gridEmpty}</div>

@@ -50,6 +50,7 @@ import { AccessItem } from "@/components/access/AccessItem";
 import { useConfirm } from "@/components/common/confirm";
 import { FilterChip } from "@/components/common/FilterChips";
 import { Input } from "@/components/ui/input";
+import { SearchInput } from "@/components/common/SearchInput";
 import { Textarea } from "@/components/ui/textarea";
 import { DraftButton } from "@/components/common/DraftButton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -395,21 +396,6 @@ export default function Goals({ me, openId, scope: forcedScope }: {
   // The version the edit dialog is writing against. Refreshed from the server when a save loses a race, so the
   // next press can deliberately overwrite what the other person did.
   const [etag, setEtag] = useState<string | undefined>(undefined);
-  // "/" jumps to the search box - the shortcut the app's own help sheet lists as "Search within the page",
-  // which until now only the feed implemented. Typing surfaces and open dialogs keep their keys.
-  const searchRef = useRef<HTMLInputElement>(null);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey) return;
-      const el = e.target as HTMLElement | null;
-      if (el && (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || el.isContentEditable)) return;
-      if (document.querySelector('[role="dialog"][data-state="open"]')) return;
-      e.preventDefault();
-      searchRef.current?.focus();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
   // Back into the address. The neutral value goes out as null, so an unfiltered page leaves a clean URL.
   useEffect(() => { writeUrlQuery("filter", filter === "all" ? null : filter); }, [filter]);
   useEffect(() => { writeUrlQuery("cycle", cycleFilter === "all" ? null : cycleFilter); }, [cycleFilter]);
@@ -1436,7 +1422,7 @@ export default function Goals({ me, openId, scope: forcedScope }: {
                 </div>
                 <div className="relative">
                   <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-                  <Input ref={searchRef} type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search goals… (/)" aria-label="Search goals" className="h-8 w-44 pl-8 text-sm sm:w-56" />
+                  <SearchInput value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search goals…" aria-label="Search goals" className="h-8 w-44 pl-8 text-sm sm:w-56" />
                 </div>
               </div>
             </div>

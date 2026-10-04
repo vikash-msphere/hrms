@@ -89,7 +89,7 @@ test.describe("rule scope and expiry", () => {
       await editor.locator('input[type="date"]').fill(until);
       await expect(editor.getByText(`Access set below removes itself on ${until}.`)).toBeVisible();
 
-      const filter = editor.getByPlaceholder("Filter roles…");
+      const filter = editor.getByRole("searchbox", { name: "Filter roles…" });
       if (await filter.count()) await filter.fill(label);
       // `has:` page-rooted, not re-scoped from `editor` - a has-locator carries its whole ancestor chain into
       // the containment check, so `editor.getByRole(...)` would ask each row to contain another dialog
