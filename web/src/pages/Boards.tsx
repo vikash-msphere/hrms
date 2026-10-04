@@ -70,6 +70,7 @@ import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
 import { useDeletedToast } from "@/hooks/useSoftDelete";
 import { TruncationNotice } from "@/components/common/TruncationNotice";
+import { cleanPrefix, derivePrefix, prefixError } from "../../../src/domain/boards";
 
 // Trello-style board frame: the columns row fills from its own top edge down to the viewport bottom, so
 // every column is the same height regardless of card count and each column scrolls its cards internally
@@ -2359,15 +2360,9 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
 // ---- New board --------------------------------------------------------------------------------------------
 
 // The key a board's tasks will carry, worked out before it is created rather than discovered afterwards.
-// Mirrors normalizePrefix/derivePrefix in src/domain/boards.ts - the server still decides, this only shows it.
+// The same helpers the server uses, so the preview is what it will store.
 function previewPrefix(name: string, prefix: string): string {
-  const normalize = (s: string) => s.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
-  const typed = normalize(prefix);
-  if (typed) return typed;
-  const words = name.trim().split(/\s+/).filter(Boolean);
-  const initials = words.map((w) => w[0]).join("");
-  const base = initials.length >= 2 ? initials : name.replace(/[^A-Za-z0-9]/g, "").slice(0, 3);
-  return normalize(base) || "TASK";
+  return cleanPrefix(prefix) || derivePrefix(name);
 }
 
 // May the caller add and work tasks on this board? A viewer sees the board and its tasks and changes nothing, so
@@ -2397,6 +2392,7 @@ function NewBoardDialog({ me, existing, onClose, onSaved }: { me: Me; existing: 
   // The board being copied from, when one is picked: a team that already runs a board wants THAT shape - its
   // columns, WIP limits, policies, labels and swimlanes - not the default flow plus twenty minutes in Configure.
   const source = form.copyFrom ? existing.find((b) => b.path === form.copyFrom) ?? null : null;
+  const prefixErr = prefixError(cleanPrefix(form.prefix));
 
   async function save() {
     const prefix = previewPrefix(form.name, form.prefix);
@@ -2425,8 +2421,8 @@ function NewBoardDialog({ me, existing, onClose, onSaved }: { me: Me; existing: 
       guardLabel="board"
       form={form}
       submitLabel="Create board"
-      canSubmit={!!form.name.trim() && (!mine.length || !!department)}
-      whyNot={form.name.trim() ? "Choose the department the board belongs to." : "Give the board a name."}
+      canSubmit={!!form.name.trim() && (!mine.length || !!department) && !prefixErr}
+      whyNot={!form.name.trim() ? "Give the board a name." : prefixErr ? `The task key prefix ${prefixErr}.` : "Choose the department the board belongs to."}
       onSubmit={save}
       submitAccess={(b) => <AccessAction collection="boards" create label="Create a board">{b}</AccessAction>}
     >
@@ -2458,7 +2454,8 @@ function NewBoardDialog({ me, existing, onClose, onSaved }: { me: Me; existing: 
       )}
       <Field
         label="Task key prefix"
-        hint={form.name.trim() ? `Tasks will be keyed ${previewPrefix(form.name, form.prefix)}-1, ${previewPrefix(form.name, form.prefix)}-2, …` : "For task keys like MS-12. Blank auto-derives from the name."}
+        hint={`Letters and digits only, starting with a letter. ${form.name.trim() ? `Tasks will be keyed ${previewPrefix(form.name, form.prefix)}-1, ${previewPrefix(form.name, form.prefix)}-2, …` : "For task keys like MS-12. Blank auto-derives from the name."}`}
+        error={prefixErr ? `The prefix ${prefixErr}.` : undefined}
       >
         <Input value={form.prefix} onChange={(e) => set({ prefix: e.target.value })} placeholder="auto (e.g. MS)" className="w-40 uppercase" maxLength={6} />
       </Field>

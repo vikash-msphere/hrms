@@ -18,7 +18,7 @@ import { etagOf } from "../http/serialize";
 import { deleteStateFilter, softDeleteRow, restoreRow, purgeRow, type PurgeCascade } from "./softDelete";
 import {
   DEFAULT_BOARD_COLUMNS, DEFAULT_SCRUM_COLUMNS, normalizeColumns, requireEntryColumn, normalizeSwimlanes, normalizeLabels,
-  normalizePrefix, derivePrefix, parseColumns, type SwimlaneMode, SWIMLANE_MODES,
+  cleanPrefix, normalizePrefix, derivePrefix, parseColumns, type SwimlaneMode, SWIMLANE_MODES,
 } from "../domain/boards";
 import { computeBoardMetrics } from "../domain/boardMetrics";
 import { checkEtag, updateAtVersion } from "./versionGuard";
@@ -129,7 +129,7 @@ export async function createBoard(deps: Deps, actor: AppUser, input: BoardInput,
       sharesJson: JSON.stringify(members),
       name,
       description: input.description?.trim() || null,
-      taskPrefix: input.task_prefix != null ? normalizePrefix(input.task_prefix) : derivePrefix(name),
+      taskPrefix: input.task_prefix != null ? asArgError(() => normalizePrefix(input.task_prefix)) : derivePrefix(name),
       mode: input.mode === "scrum" ? "scrum" : "kanban",
       columnsJson: JSON.stringify(columns),
       swimlaneMode: mode,
@@ -154,7 +154,8 @@ export async function updateBoard(deps: Deps, actor: AppUser, id: string, patch:
     set.name = patch.name.trim();
   }
   if (has("description")) set.description = patch.description?.trim() || null;
-  if (has("task_prefix")) set.taskPrefix = normalizePrefix(patch.task_prefix);
+  // A board saved before prefixes had to start with a letter keeps its prefix through a save that resends it.
+  if (has("task_prefix") && cleanPrefix(patch.task_prefix) !== row.taskPrefix) set.taskPrefix = asArgError(() => normalizePrefix(patch.task_prefix));
   if (has("mode")) set.mode = patch.mode === "scrum" ? "scrum" : "kanban";
   // Moving the board to another department moves who manages it. Clearing it is allowed (whoever manages the
   // board through its sharing list keeps it); naming one is held to the rule a create is.

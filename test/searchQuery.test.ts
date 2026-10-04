@@ -75,6 +75,14 @@ describe("an org's own synonym groups", () => {
     expect(matchExpression("zeus")).toBe('"zeus"*');
   });
 
+  it("widen a word a built-in group already has, by both groups", () => {
+    const org = normalizeSynonymGroups([["laptop", "devbox"], ["devbox", "workstation"]]);
+    expect(matchExpression("laptop", org)).toBe('("laptop"* OR "notebook"* OR "macbook"* OR "devbox"*)');
+    // A word in two org groups widens to both; the two groups' other words do not reach each other.
+    expect(matchExpression("devbox", org)).toBe('("devbox"* OR "laptop"* OR "workstation"*)');
+    expect(matchExpression("workstation", org)).toBe('("workstation"* OR "devbox"*)');
+  });
+
   it("are cleaned on the way in: case, punctuation, repeats, and groups too small to widen anything", () => {
     expect(normalizeSynonymGroups([["CL", "cl", "Casual-Leave!"], ["alone"], "not a group", [1, 2]])).toEqual([["cl", "casual leave"]]);
     expect(normalizeSynonymGroups("nonsense")).toEqual([]);
