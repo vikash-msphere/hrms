@@ -112,8 +112,16 @@ describe("search vocabulary", () => {
     const vocab = searchVocabulary(new Set(["leave-requests", "holidays", "not-a-collection"]));
     expect(vocab).toEqual([
       { collection: "leave-requests", statuses: ["pending", "approved", "rejected", "cancelled"] },
-      { collection: "holidays", statuses: [] }, // no status column
+      { collection: "holidays", statuses: [], reference: true }, // no status column; an org-wide catalog
     ]);
+  });
+
+  it("marks exactly the catalog and inbox kinds as reference, so ⌘K offers them after somebody's records", () => {
+    const vocab = searchVocabulary(new Set(SEARCH_INDEX.map((e) => e.collection)));
+    const reference = new Set(vocab.filter((v) => v.reference).map((v) => v.collection));
+    expect(reference).toEqual(new Set(SEARCH_INDEX.filter((e) => e.scoping.kind !== "scoped").map((e) => e.collection)));
+    expect(reference.has("automations") && reference.has("notifications") && reference.has("leave-types")).toBe(true);
+    expect(reference.has("attendance") || reference.has("employees") || reference.has("tickets")).toBe(false);
   });
 
   it("every collection with a status column reads a real enum off it", () => {

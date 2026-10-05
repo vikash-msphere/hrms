@@ -29,13 +29,25 @@ Written 2026-10-04. Items are ordered by value for the effort, not by dependency
   after `in:`, statuses after `status:`, people after `@` - in plain words. Tab / Enter take the lit one, → and
   ← walk them, ↓ goes to the list. The half-typed word is left out of the search, so the list stays useful.
   The `?` / `-` guide stays in the list as rows.
-- **`in:` kinds ranked, with counts.** Every kind is offered (no longer the first 8 alphabetically), biggest
-  first: with other words in the box, by how many of their results are of that kind (free - the loaded answer);
-  with none, by how many records of that kind the caller can search at all, from `GET /v1/search:counts` -
-  one grouped read of `search_counts`, the index pre-counted by triggers (migration 0010) under the same scope
-  predicate the search binds, instead of counting `search_docs` itself (measured: 95 rows visited vs 368 on the
-  dev data, the gap growing with record volume). Ties go to the kinds this person opens most.
-  Suggestions write a kind under its shown name (`in:tasks`, not `in:cards`; `inWordOf`).
+- **`in:` kinds ranked by likely pick, with counts.** Every kind is offered (not cut at 8), ordered by
+  `rankKindOffers` (web/src/lib/paletteQuery.ts), first difference wins:
+  1. a name that starts with the typed letters;
+  2. with other words, how many of their results are of that kind (free - the loaded answer), with none last
+     and muted;
+  3. the kinds on the page the search was opened from (`collectionsOnRoute`, web/src/lib/resourceRoute.ts);
+  4. this person's kind affinity - `in:` picks and opened results, decayed, in their `search_kinds` preference
+     (web/src/lib/searchKinds.ts), so it follows them across devices;
+  5. somebody's records before reference kinds (catalogs and the notification inbox: `reference` on
+     `GET /v1/search:vocabulary`);
+  6. on a bare `in:`, how many records words can find there, from `GET /v1/search:counts`;
+  7. alphabetical.
+
+  The count on a bare `in:` comes from one grouped read of `search_counts`: the index pre-counted by triggers
+  under the same scope predicate the search binds, instead of counting `search_docs` itself (measured: 95 rows
+  visited vs 368 on the dev data, the gap growing with record volume). Only TITLED rows count (migration 0011).
+  A row with no title, such as an attendance punch without a note, is listed by filters but found by no word.
+  Raw row count is the weakest signal: the kinds that pile up rows (punches, seeded workflows) are the least
+  searched. Suggestions write a kind under its shown name (`in:tasks`, not `in:cards`; `inWordOf`).
 - **Pills.** Every filter in force - typed or from the menu - as a pill that says what it means, with × and
   Clear all. Removing a typed one edits the box.
 - **No dead ends.** Narrowed to nothing, the list offers `Search everything for "…"`, saying what it lets go.

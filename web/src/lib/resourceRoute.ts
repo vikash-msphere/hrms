@@ -92,6 +92,23 @@ const PROFILE_TAB_OF: Record<string, string> = {
 };
 
 /**
+ * The collections a route shows - the reverse of the maps above, so it cannot drift from where a record opens.
+ * A profile tab (`profile/<tab>`, `employees/<id>/<tab>`) answers the kinds that tab lists, `settings/<panel>`
+ * the catalogs that panel edits, and any other path the collections whose page it is or sits under. ⌘K offers
+ * these first after `in:` (paletteQuery.ts rankKindOffers): what is on screen is the likeliest thing to narrow to.
+ */
+export function collectionsOnRoute(pathname: string): Set<string> {
+  const path = pathname.replace(/^\/+/, "").replace(/[?#].*$/, "").replace(/\/+$/, "");
+  const parts = path.split("/");
+  const tab = parts[0] === "profile" ? parts[1] : parts[0] === "employees" ? parts[2] : undefined;
+  const fromTab = tab ? Object.keys(PROFILE_TAB_OF).filter((c) => PROFILE_TAB_OF[c] === tab) : [];
+  if (fromTab.length) return new Set(fromTab);
+  if (parts[0] === "settings") return new Set(Object.keys(SETTINGS_PANEL).filter((c) => SETTINGS_PANEL[c] === parts[1]));
+  const under = (route: string | undefined) => !!route && (path === route || path.startsWith(`${route}/`));
+  return new Set([...Object.keys(PAGE_OF), ...Object.keys(DEEP_OPEN)].filter((c) => under(PAGE_OF[c]) || under(DEEP_OPEN[c])));
+}
+
+/**
  * Where a decider opens ONE request: somebody else's goes to the requester's profile tab that lists it, with
  * the request picked out; the caller's own goes to their self-service page, which is where it lives. Company
  * expenses have a page of their own for other people's claims (the review queue, or the whole ledger once

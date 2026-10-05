@@ -1,3 +1,5 @@
+import { hasUnsavedChanges } from "@/router";
+
 // The session-history entry an open dialog owns.
 //
 // On a phone a modal IS a screen, so the back gesture has to dismiss it rather than unmount the page behind
@@ -24,6 +26,16 @@
 // When we do skip, the closing dialog's entry is left buried rather than popped - one dead entry that costs
 // an extra back press, which is the cheap side of this trade.
 let lastPush = 0;
+
+// Set once the document has started to go away - a reload, a link out, a closed tab. The drop runs on a timer
+// after the layer's exit animation, so a reload pressed in the ~200ms after closing a dialog used to meet our
+// own `history.back()` on its way out, and the traversal cancelled the reload outright: the press did nothing.
+// Nothing needs dropping from a history the reader is leaving. Not set while an unsaved form is asking "leave
+// without saving?" - the reader may stay, and then the entry still has to go.
+let leaving = false;
+window.addEventListener("beforeunload", () => {
+  if (!hasUnsavedChanges()) leaving = true;
+});
 
 /**
  * Is the popstate being delivered right now one the APP asked for?
@@ -133,7 +145,7 @@ export function dropDialogEntry(token: number): void {
     if (pendingDrop?.token === token) pendingDrop = null;
     const stale = pushedOver.get(token);
     pushedOver.delete(token);
-    if (token !== lastPush) return;
+    if (token !== lastPush || leaving) return;
     const ours = (window.history.state as { hrmsDialog?: boolean } | null)?.hrmsDialog === true;
     if (!ours) return;
     // Roll the token back so a dialog UNDER this one (a confirm over a form: the confirm drops first) still

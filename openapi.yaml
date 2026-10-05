@@ -18659,10 +18659,13 @@ paths:
                           type: array
                           items: { type: string }
                           description: "Empty when the collection has no status column, or one that holds free text."
+                        reference:
+                          type: boolean
+                          description: "Present (true) when the kind is not somebody's records: an org-wide catalog or the caller's own notifications. The search box offers these after the record kinds."
         '500': { $ref: '#/components/responses/Problem' }
   /v1/search:counts:
     get:
-      description: "Custom method counts: how many records of each kind the caller can search - the totals the search box shows on its `in:` suggestions, biggest first. Counted under the same per-collection list scope the search applies, from a pre-counted table rather than the index itself. A kind the caller may list but whose scope carries per-record shares or denies is left out, as is one with nothing in it."
+      description: "Custom method counts: how many records of each kind the caller can find by words (an indexed record with a title) - the totals the search box shows on its `in:` suggestions. Counted under the same per-collection list scope the search applies, from a pre-counted table rather than the index itself. A kind the caller may list but whose scope carries per-record shares or denies is left out, as is one with nothing in it."
       operationId: ":CountsSearch"
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }

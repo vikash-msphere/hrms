@@ -21,19 +21,20 @@ import { useAccessMode } from "@/components/access/AccessModeProvider";
 import { NAV, itemVisible, navAdmits } from "@/nav";
 import { SETTINGS_REGISTRY, settingsEntryVisible } from "@/settings/registry";
 import { hasCapability } from "@/lib/perm";
-import { navigate } from "@/router";
+import { navigate, useRoute } from "@/router";
 import { cn, idOf } from "@/lib/utils";
 import { useCollection } from "@/hooks/useCollection";
 import { resolveQuickActionList, runQuickAction } from "@/lib/quickActions";
 import { useOrg } from "@/lib/org";
 import { api, invoke } from "@/api";
-import { resourceRoute } from "@/lib/resourceRoute";
+import { collectionsOnRoute, resourceRoute } from "@/lib/resourceRoute";
+import { frecencyScore, useKindAffinity } from "@/lib/searchKinds";
 import { collectionsOfTone, entityLabel, entityLabelSingular, iconOf, toneOf, TONE_CLS, type Tone } from "@/lib/entityKinds";
 import type { OrgSettings } from "@/lib/org";
 import type { LucideIcon } from "lucide-react";
 import type { Department, Employee, Me, SearchHit, SearchPage } from "@/types";
 import { useAiFeature } from "@/lib/aiFeatures";
-import { GUIDE_WORD, applySuggestion, collectionsNamedBy, inWordOf, highlightParts, highlightTokens, isNarrowed, looksLikeQuestion, nearPeople, parsePaletteQuery, pushRecent, resolveDay, resolvePerson, searchParams, suggestFilters, tokenAt, type FilterSuggestion, type FilterVocabulary, type PalettePerson, type PaletteQuery } from "@/lib/paletteQuery";
+import { GUIDE_WORD, applySuggestion, collectionsNamedBy, inWordOf, highlightParts, highlightTokens, isNarrowed, looksLikeQuestion, nearPeople, parsePaletteQuery, pushRecent, rankKindOffers, resolveDay, resolvePerson, searchParams, suggestFilters, tokenAt, type FilterSuggestion, type FilterVocabulary, type PalettePerson, type PaletteQuery } from "@/lib/paletteQuery";
 import { addDaysYmd, orgDayFromToday, stampDay, todayStr, weekStartYmd } from "@/lib/orgDay";
 
 // One row of the palette. Everything the palette can offer - a create flow, a page, a settings panel, or an
@@ -138,9 +139,10 @@ function score(item: Item, q: string): number {
 }
 
 // ---- Frecency ----------------------------------------------------------------------------------------------
-// What this user actually opens from the palette, kept in localStorage per user: use-count decayed by
-// recency. Ranks the empty-query view ("Recent" on top) and breaks match-score ties while typing, so the
-// palette learns the handful of destinations each person lives in.
+// What this user actually opens from the palette, kept in localStorage per user: use-count decayed by recency
+// (lib/searchKinds.ts frecencyScore, shared with the `in:` kind ranking). Ranks the empty-query view ("Recent"
+// on top) and breaks match-score ties while typing, so the palette learns the handful of destinations each
+// person lives in.
 type FrecencyMap = Record<string, { n: number; t: number }>;
 const frecencyLsKey = (email: string) => `palette:frecent:${email}`;
 function loadFrecency(email: string): FrecencyMap {
@@ -163,11 +165,6 @@ function bumpFrecency(email: string, key: string) {
   } catch {
     /* private mode */
   }
-}
-function frecencyScore(e?: { n: number; t: number }): number {
-  if (!e) return 0;
-  const days = (Date.now() - e.t) / 86_400_000;
-  return e.n / (1 + days); // linear recency decay: recent + frequent floats up, stale entries fade
 }
 
 /** True when the caret sits at the end of the input, so an arrow key is not also moving through the text. */
@@ -498,8 +495,8 @@ function usePaletteSearch({ me, open, close }: { me: Me; open: boolean; close: (
         vocabularyAsked.current = false;
       });
   }, [wantsVocabulary, vocabulary]);
-  // How many records of each kind this caller can search (GET /v1/search:counts) - the `in:` suggestions' totals
-  // when there are no other words to count results for (`kindCounts`). Asked the first time `in:` is typed, once
+  // How many records of each kind this caller can find by words (GET /v1/search:counts) - the `in:` suggestions'
+  // totals when there are no other words to count results for (`kindSignals`). Asked the first time `in:` is typed, once
   // per page life like the vocabulary: one grouped read of the pre-counted table, not cheap enough to ask on
   // every keystroke, and a total a few records out of date still ranks the kinds the same way.
   const [kindTotals, setKindTotals] = useState<Record<string, number> | null>(null);
@@ -751,6 +748,11 @@ function usePaletteSearch({ me, open, close }: { me: Me; open: boolean; close: (
   };
   // Saved searches (lib/savedSearches.ts): read the first time the search is opened.
   const savedSearches = useSavedSearches(opened);
+  // Which kinds this person narrows to and opens (lib/searchKinds.ts), and which the page behind the search
+  // shows: the two things the `in:` suggestions are ranked by after the typed words (rankKindOffers).
+  const kindAffinity = useKindAffinity(opened);
+  const route = useRoute();
+  const pageKinds = useMemo(() => collectionsOnRoute([route.page, route.id, route.sub].filter(Boolean).join("/")), [route.page, route.id, route.sub]);
   // Running one puts back everything it was saved with - words, category, Filters menu - and leaves the caret
   // after the words, ready for one more. A category or a filter value this caller no longer has falls back to
   // none rather than to a narrowing they cannot see.
@@ -1078,31 +1080,27 @@ function usePaletteSearch({ me, open, close }: { me: Me; open: boolean; close: (
     return { pages, byTone, total: pages + records.length };
   }, [unscoped, unscopedRecords, local, frecent]);
 
-  // What each `in:` suggestion counts, and is ranked by (`completion`): with other words in the box, how many of
-  // the results those words found are of that kind - free, it is the answer already loaded, and "12+" when the
-  // answer reached the server's cap; with none, how many records of that kind the caller can search at all
-  // (`kindTotals`). `words` says which, because a kind missing from the results found none, while a kind missing
-  // from the totals may just not be countable there (its scope names single records).
-  const kindCounts = useMemo(() => {
-    if (unscoped.text.trim()) {
-      if (!unscopedRecords) return null;
+  // What the `in:` suggestions are ranked by and count (paletteQuery.ts rankKindOffers). With other words in the
+  // box, how many of the results those words found are of each kind - free, it is the answer already loaded, and
+  // "12+" when it reached the server's cap; with none, how many records of each kind words can find
+  // (`kindTotals`). Plus the page behind the search, this person's use of each kind, and which kinds are
+  // catalogs rather than records.
+  const kindSignals = useMemo(() => {
+    const words = !!unscoped.text.trim();
+    let results: { by: Map<string, number>; capped: boolean } | undefined;
+    if (words && unscopedRecords) {
       const by = new Map<string, number>();
       for (const h of unscopedRecords) by.set(h.collection, (by.get(h.collection) ?? 0) + 1);
-      return { by, capped: unscopedRecords.length >= SERVER_TOTAL, words: true };
+      results = { by, capped: unscopedRecords.length >= SERVER_TOTAL };
     }
-    return kindTotals ? { by: new Map(Object.entries(kindTotals)), capped: false, words: false } : null;
-  }, [unscoped, unscopedRecords, kindTotals]);
-  // How much this person opens results of each kind from the search: their frecency summed by collection (a
-  // record result's frecency key is its `collection/id` name). The `in:` ranking's tiebreak, and its whole order
-  // while there is nothing to count.
-  const kindUse = useMemo(() => {
-    const use = new Map<string, number>();
-    for (const [key, e] of Object.entries(frecent)) {
-      const slash = key.indexOf("/");
-      if (slash > 0) use.set(key.slice(0, slash), (use.get(key.slice(0, slash)) ?? 0) + frecencyScore(e));
-    }
-    return use;
-  }, [frecent]);
+    return {
+      results,
+      totals: !words && kindTotals ? new Map(Object.entries(kindTotals)) : undefined,
+      pageKinds,
+      affinity: kindAffinity.affinity,
+      reference: new Set((vocabulary ?? []).filter((v) => v.reference).map((v) => v.collection)),
+    };
+  }, [unscoped, unscopedRecords, kindTotals, pageKinds, kindAffinity.affinity, vocabulary]);
   const countOf = (s: Exclude<Scope, "all">) =>
     !chipCounts ? undefined : s === "pages" ? chipCounts.pages : chipCounts.byTone ? (chipCounts.byTone.get(s) ?? 0) : undefined;
   // Every category this caller can search, always and in the same order; one with nothing for these words is
@@ -1205,6 +1203,7 @@ function usePaletteSearch({ me, open, close }: { me: Me; open: boolean; close: (
       return;
     }
     bumpFrecency(me.email, item.key);
+    if (item.record) kindAffinity.bump(item.record.collection);
     // A search that led somewhere is worth offering again next time the box is empty.
     if (query.trim()) saveRecentQuery(query);
     // Counted, not logged: how it was found and where it sat, never what it was (services/searchInsights.ts).
@@ -1224,6 +1223,7 @@ function usePaletteSearch({ me, open, close }: { me: Me; open: boolean; close: (
   const goNewTab = (item: Item) => {
     if (item.run || !item.route) return go(item);
     bumpFrecency(me.email, item.key);
+    if (item.record) kindAffinity.bump(item.record.collection);
     if (query.trim()) saveRecentQuery(query);
     window.open(`/${item.route.replace(/^\//, "")}`, "_blank", "noopener");
   };
@@ -1236,23 +1236,22 @@ function usePaletteSearch({ me, open, close }: { me: Me; open: boolean; close: (
   // The guide (`?`, a bare `-`) is not values but the filter words themselves, each with what it does and an
   // example - reading, not picking - so it stays in the list as rows (`guide`, in the sections) and only real
   // values become chips.
-  // The kinds after `in:` come ranked - most first, by `kindCounts`, then by how much this person uses each
-  // (`kindUse`), then alphabetically - each with its count; a kind the words found nothing of stays offered (it is
-  // still a narrowing) but last and muted.
+  // The kinds after `in:` come ranked by `rankKindOffers` (`kindSignals`), each with its count; a kind the words
+  // found nothing of stays offered (it is still a narrowing) but last and muted. Taking one counts towards this
+  // person's use of that kind, as opening a result of it does; leaving one out (`-in:`) does not.
   const completion = useMemo(() => {
     if (!filterOffers?.items.length || filterOffers.items[0]!.kind === "key") return null;
-    const items = filterOffers.items.map((s) => filterItem(s, acceptFilter));
-    if (filterOffers.items[0]!.kind !== "in") return items;
-    const shown = (n: number) => `${n.toLocaleString()}${kindCounts?.capped ? "+" : ""}`;
-    return filterOffers.items
-      .map((s, i) => {
-        const collection = s.kind === "in" ? s.collection : "";
-        const n = !kindCounts ? undefined : kindCounts.words ? (kindCounts.by.get(collection) ?? 0) : kindCounts.by.get(collection);
-        return { item: { ...items[i]!, count: n === undefined ? undefined : shown(n), muted: n === 0 }, n, use: kindUse.get(collection) ?? 0, i };
-      })
-      .sort((a, b) => (b.n ?? -1) - (a.n ?? -1) || b.use - a.use || a.i - b.i)
-      .map((r) => r.item);
-  }, [filterOffers, kindCounts, kindUse]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (filterOffers.items[0]!.kind !== "in") return filterOffers.items.map((s) => filterItem(s, acceptFilter));
+    const kinds = filterOffers.items.flatMap((s) => (s.kind === "in" ? [s] : []));
+    return rankKindOffers(kinds, kindSignals).map(({ offer, count, muted }) => ({
+      ...filterItem(offer, (token) => {
+        if (!offer.negate) kindAffinity.bump(offer.collection);
+        acceptFilter(token);
+      }),
+      count,
+      muted,
+    }));
+  }, [filterOffers, kindSignals]); // eslint-disable-line react-hooks/exhaustive-deps
   const [pick, setPick] = useState(0);
   const [onList, setOnList] = useState(false);
   useEffect(() => {

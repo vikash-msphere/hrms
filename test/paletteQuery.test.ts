@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { applySuggestion, collectionsNamedBy, editDistance, highlightParts, highlightTokens, isNarrowed, looksLikeQuestion, nearPeople, parsePaletteQuery, pushRecent, searchParams, suggestFilters, tokenAt, type FilterVocabulary } from "../web/src/lib/paletteQuery";
+import { applySuggestion, collectionsNamedBy, editDistance, highlightParts, highlightTokens, isNarrowed, looksLikeQuestion, nearPeople, parsePaletteQuery, pushRecent, rankKindOffers, searchParams, suggestFilters, tokenAt, type FilterVocabulary, type KindSignals } from "../web/src/lib/paletteQuery";
+import { collectionsOnRoute } from "../web/src/lib/resourceRoute";
 
 const people = [
   { id: "e1", first: "Priya", last: "Nair" },
@@ -153,6 +154,15 @@ describe("filter suggestions", () => {
     expect(tokens("status:", 7, wide)).toHaveLength(8);
   });
 
+  it("marks an in: offer whose name starts with the typed letters, not one where a later word does", () => {
+    const offers = suggestFilters("in:", 3, ctx)!.items;
+    expect(offers.some((s) => s.kind === "in" && s.prefix)).toBe(false); // nothing typed: nothing to start with
+    const typed = suggestFilters("in:le", 5, { ...ctx, vocabulary: [...vocabulary, { collection: "letter-templates", statuses: [] }], labelOf: (c) => labels[c] ?? "Letter templates" })!.items;
+    expect(typed.map((s) => [s.token, s.kind === "in" && !!s.prefix])).toEqual([["in:leave-requests", true], ["in:letter-templates", true]]);
+    const wordOnly = suggestFilters("in:req", 6, ctx)!.items;
+    expect(wordOnly.map((s) => [s.token, s.kind === "in" && !!s.prefix])).toEqual([["in:leave-requests", false]]);
+  });
+
   it("completes status: from every collection, or only from the ones in: names", () => {
     expect(tokens("status:")).toEqual(["status:pending", "status:approved", "status:in_progress", "status:open"]);
     expect(tokens("status:prog")).toEqual(["status:in_progress"]);
@@ -276,5 +286,62 @@ describe("looksLikeQuestion", () => {
     expect(looksLikeQuestion("payslip?")).toBe(true);
     expect(looksLikeQuestion("claim my internet bill")).toBe(true);
     expect(looksLikeQuestion("?")).toBe(false); // the filter guide, not a question
+  });
+});
+
+describe("rankKindOffers", () => {
+  // In the alphabetical order suggestFilters hands them over.
+  const offers = ["attendance", "automations", "employees", "leave-requests", "notifications", "tickets"].map((collection) => ({ collection }));
+  const none: KindSignals = { pageKinds: new Set(), affinity: new Map(), reference: new Set(["automations", "notifications"]) };
+  const order = (s: KindSignals, o: readonly { collection: string; prefix?: true }[] = offers) => rankKindOffers(o, s).map((r) => r.offer.collection);
+
+  it("puts somebody's records before catalogs and the inbox, then the most findable first, then alphabetical", () => {
+    // Attendance's untitled punches are not in the totals at all (migration 0011), and automations are a
+    // catalog however many there are.
+    const totals = new Map([["automations", 119], ["notifications", 33], ["employees", 13], ["tickets", 4]]);
+    expect(order({ ...none, totals })).toEqual(["employees", "tickets", "attendance", "leave-requests", "automations", "notifications"]);
+    // Nothing counted yet: records first, alphabetical within.
+    expect(order(none)).toEqual(["attendance", "employees", "leave-requests", "tickets", "automations", "notifications"]);
+  });
+
+  it("ranks the page behind the search above this person's use, and their use above everything after it", () => {
+    const totals = new Map([["employees", 500]]);
+    const affinity = new Map([["leave-requests", 3], ["automations", 9]]);
+    expect(order({ ...none, totals, affinity })).toEqual(["automations", "leave-requests", "employees", "attendance", "tickets", "notifications"]);
+    expect(order({ ...none, totals, affinity, pageKinds: new Set(["tickets"]) })[0]).toBe("tickets");
+  });
+
+  it("with other words, leads with where their results are and mutes the kinds they found nothing in", () => {
+    const results = { by: new Map([["tickets", 12], ["employees", 1]]), capped: true };
+    const ranked = rankKindOffers(offers, { ...none, results, pageKinds: new Set(["leave-requests"]) });
+    expect(ranked.map((r) => [r.offer.collection, r.count, r.muted])).toEqual([
+      ["tickets", "12+", false], ["employees", "1+", false],
+      ["leave-requests", "0+", true], ["attendance", "0+", true], ["automations", "0+", true], ["notifications", "0+", true],
+    ]);
+  });
+
+  it("puts a name starting with the typed letters before one where a later word does, whatever the counts", () => {
+    const typed = [{ collection: "leave-requests" }, { collection: "reimbursements", prefix: true as const }];
+    expect(order({ ...none, totals: new Map([["leave-requests", 900], ["reimbursements", 2]]), affinity: new Map([["leave-requests", 5]]) }, typed))
+      .toEqual(["reimbursements", "leave-requests"]);
+  });
+
+  it("shows the total on a bare in:, and no number for a kind the totals leave out", () => {
+    const ranked = rankKindOffers(offers, { ...none, totals: new Map([["employees", 1240]]) });
+    expect(ranked.find((r) => r.offer.collection === "employees")).toMatchObject({ count: (1240).toLocaleString(), muted: false });
+    expect(ranked.find((r) => r.offer.collection === "tickets")).toMatchObject({ count: undefined, muted: false });
+  });
+});
+
+describe("collectionsOnRoute", () => {
+  it("answers the kinds a page, a settings panel or a profile tab shows", () => {
+    expect([...collectionsOnRoute("/tickets")]).toEqual(["tickets"]);
+    expect([...collectionsOnRoute("tickets/abc123")]).toEqual(["tickets"]);
+    expect(collectionsOnRoute("/attendance")).toEqual(new Set(["attendance", "attendance-regularizations"]));
+    expect(collectionsOnRoute("/settings/leave-types")).toEqual(new Set(["leave-types"]));
+    expect(collectionsOnRoute("/employees/abc/leave")).toEqual(new Set(["leave-requests", "leave-encashments"]));
+    expect(collectionsOnRoute("/profile/compensation")).toEqual(new Set(["reimbursements", "loans"]));
+    expect(collectionsOnRoute("/employees/abc")).toEqual(new Set(["employees", "positions"]));
+    expect(collectionsOnRoute("/dashboard").size).toBe(0);
   });
 });
