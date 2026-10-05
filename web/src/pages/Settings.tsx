@@ -100,7 +100,7 @@ import { ShieldAlert } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
 import { useDeletedToast } from "@/hooks/useSoftDelete";
-import { getSetting, saveSetting } from "@/lib/settingsStore";
+import { getSetting, getSettingForEdit, invalidateSettings, saveSetting } from "@/lib/settingsStore";
 
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
 
@@ -164,14 +164,14 @@ function batchError(r: { error: unknown; written: string[] }): { variant: "destr
   };
 }
 
+const CONFLICT_TOAST = {
+  variant: "destructive",
+  title: "Somebody else changed this",
+  description: "Another admin saved this section while you had it open. Your version is still on screen: press Save again to replace theirs, or reload the page to see what they changed first.",
+} as const;
+
 function saveSettingError(e: unknown): { variant: "destructive"; title: string; description: string } {
-  return isConflict(e)
-    ? {
-        variant: "destructive",
-        title: "Somebody else changed this",
-        description: "Another admin saved this section while you had it open. Your version is still on screen: press Save again to replace theirs, or reload the page to see what they changed first.",
-      }
-    : { variant: "destructive", title: "Couldn't save", description: describeError(e) };
+  return isConflict(e) ? CONFLICT_TOAST : { variant: "destructive", title: "Couldn't save", description: describeError(e) };
 }
 const DEFAULT_FIELDS: EmployeeFieldDef[] = [
   { key: "pan", label: "PAN", mandatory: false, sensitive: true },
@@ -665,6 +665,7 @@ function EsignTab({ toast }: { toast: Toast }) {
   const vendors = providers.filter((p) => p.configFields.length > 0);
   const setField = (id: string, key: string, v: string | number) => setCfg((c) => ({ ...c, providers: { ...c.providers, [id]: { ...(c.providers[id] ?? {}), [key]: v } } }));
 
+  if (!ready) return <PanelSkeleton />; // see QuickActionsTab: no live inputs before the stored value lands
   return (
     <div className="grid gap-4">
       <Card>
@@ -952,6 +953,7 @@ function ReferralsTab({ toast }: { toast: Toast }) {
       toast(saveSettingError(e));
     } finally { setSaving(false); }
   }
+  if (!ready) return <PanelSkeleton />; // see QuickActionsTab: no live inputs before the stored value lands
   return (
     <Card>
       <CardHeader>
@@ -1074,6 +1076,7 @@ function AtsTab({ toast }: { toast: Toast }) {
     } finally { setSaving(false); }
   }
 
+  if (!ready) return <PanelSkeleton />; // see QuickActionsTab: no live inputs before the stored value lands
   return (
     <Card>
       <CardHeader>
@@ -1264,6 +1267,7 @@ function AttendanceTab({ toast }: { toast: Toast }) {
       toast(saveSettingError(e));
     } finally { setSaving(false); }
   }
+  if (!ready) return <PanelSkeleton />; // see QuickActionsTab: no live inputs before the stored value lands
   return (
     <Card>
       <CardHeader>
@@ -1558,6 +1562,7 @@ function ExpensesPanel({ toast, openId }: { toast: Toast; openId?: string }) {
     }
   }
 
+  if (!ready) return <PanelSkeleton />; // see QuickActionsTab: no live inputs before the stored value lands
   return (
     <Tabs defaultValue="rules">
       <TabsList variant="segmented">
@@ -1690,6 +1695,7 @@ function TicketsTab({ toast }: { toast: Toast }) {
     }
   }
 
+  if (!ready) return <PanelSkeleton />; // see QuickActionsTab: no live inputs before the stored value lands
   return (
     <Card>
       <CardHeader>
@@ -2046,36 +2052,79 @@ function LetterheadRow({ logo, reload, toast, onDesign }: { logo: Letterhead; re
 
 // Organization identity (name + logo) - a single settings/organization row; the logo is a small data URL.
 // Saving refreshes the app-wide org context so the sidebar brand updates immediately.
-// The organization blob (settings/organization) backs three panels: identity, banks & currency and letter
-// defaults. Each panel loads the full blob, edits its slice, and saves slice-merged-into-blob so the other
-// panels' fields survive (read-modify-write; single-admin last-write-wins is fine here).
+// The organization blob (settings/organization) backs four panels: identity, banks & currency, letter defaults
+// and the quick-create menu. Each loads the full blob and edits its own fields of it.
+//
+// A save writes only the fields this panel CHANGED since it was shown them, onto the row as it stands at save
+// time, guarded on that version. Writing the whole slice onto the blob read at mount made two admins (or two
+// panels) editing DIFFERENT fields conflict - the identity panel carries the name font and the default
+// department alike - and the "press Save again" after it put the other's fields back to what this panel was
+// opened with. A conflict is now only what it says: somebody else changed a field this reader edited.
+const normField = (v: unknown) => JSON.stringify(v === undefined || v === "" ? null : v);
+const sameField = (a: unknown, b: unknown) => normField(a) === normField(b);
+
 function useOrgBlob(toast: Toast) {
   const { reload } = useOrg();
   const [blob, setBlob] = useState<Partial<OrgSettings> | null>(null);
-  // The version THIS blob was read at, carried to the save. The read happens once at mount and the save
-  // rebuilds the whole blob from it, so the write has to be checked against the version the value came from -
-  // a version looked up at write time can be a sibling tab's newer one, which turns "your copy is stale" into
-  // an accepted write that silently reverts their slice (see saveSetting).
-  const version = useRef<string | undefined>(undefined);
+  // What the panel's form was filled from, and moved on by each save it makes: the baseline its edits are
+  // diffed against. Not moved by a re-read, or a field the reader never touched would read as edited.
+  const shown = useRef<Record<string, unknown>>({});
   const [saving, setSaving] = useState(false);
+  // The blob stays null until a read actually LANDS. Hydrating it from a failed read (as `{}`) made any
+  // panel's save - the quick-create menu's included - an overwrite of the organization's name, logos and
+  // address with nothing.
   useEffect(() => {
-    getSetting<Partial<OrgSettings>>("organization")
-      .then((s) => { version.current = s.version; setBlob(s.value ?? {}); })
-      .catch(() => setBlob({}));
+    let live = true;
+    getSettingForEdit<Partial<OrgSettings>>("organization").then(
+      (s) => {
+        if (!live) return;
+        shown.current = { ...(s.value ?? {}) };
+        setBlob(s.value ?? {});
+      },
+      () => {
+        if (live) toast({ variant: "destructive", title: "Couldn't load the organization settings", description: "Reload the page before editing; nothing here can be saved until they load." });
+      },
+    );
+    return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- read once at mount
   }, []);
   // Returns whether the save landed, so callers can clear their unsaved-changes baseline only on success.
   async function save(slice: Record<string, unknown>, savedTitle: string): Promise<boolean> {
+    if (!blob) {
+      toast({ variant: "destructive", title: "Not saved", description: "The organization settings haven't loaded yet. Reload the page and try again." });
+      return false;
+    }
     setSaving(true);
     try {
-      const value = { ...(blob ?? {}), ...slice };
-      await saveSetting("organization", { value }, version.current);
-      // The row this tab now holds is the one it just wrote, so re-read the version it landed at: without it a
-      // second save from the same open panel would carry the pre-save version and take a 409 it has not earned.
-      version.current = (await getSetting<Partial<OrgSettings>>("organization")).version;
-      setBlob(value as Partial<OrgSettings>);
-      reload();
-      toast({ title: savedTitle, variant: "success" });
-      return true;
+      const mine = Object.fromEntries(Object.entries(slice).filter(([k, v]) => !sameField(v, shown.current[k])));
+      for (let attempt = 0; ; attempt++) {
+        // The row as it stands now (the snapshot dropped so this is a real read, not the copy from mount).
+        invalidateSettings();
+        const fresh = await getSettingForEdit<Partial<OrgSettings>>("organization");
+        const current = (fresh.value ?? {}) as Record<string, unknown>;
+        const theirs = Object.keys(mine).filter((k) => !sameField(current[k], shown.current[k]) && !sameField(current[k], mine[k]));
+        if (theirs.length) {
+          // Somebody else changed a field this reader edited. Their value becomes the baseline for those
+          // fields, so the "press Save again" the toast offers replaces exactly them and nothing else.
+          for (const k of theirs) shown.current[k] = current[k];
+          setBlob(current as Partial<OrgSettings>);
+          toast(CONFLICT_TOAST);
+          return false;
+        }
+        const value = { ...current, ...mine };
+        try {
+          // `null` when the read found no row, so the write may only create one.
+          await saveSetting("organization", { value }, fresh.version ?? null);
+        } catch (e) {
+          if (isConflict(e) && attempt < 2) continue; // another write landed between the read and this one
+          throw e;
+        }
+        shown.current = { ...value };
+        setBlob(value as Partial<OrgSettings>);
+        reload();
+        toast({ title: savedTitle, variant: "success" });
+        return true;
+      }
     } catch (e) {
       toast(saveSettingError(e));
       return false;
@@ -2229,6 +2278,9 @@ function QuickActionsTab({ toast }: { toast: Toast }) {
     );
   };
 
+  // Not a form until the blob has landed: an editor painted from its empty state takes typing, then the
+  // hydration above replaces that typing with the stored values (and Save refuses an unloaded blob anyway).
+  if (!ready) return <PanelSkeleton />;
   return (
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
@@ -2454,6 +2506,7 @@ function OrgIdentityPanel({ toast }: { toast: Toast }) {
     if (ok) markSaved();
   }
 
+  if (!ready) return <PanelSkeleton />; // see QuickActionsTab: no live inputs before the blob lands
   return (
     <div>
       {/* Identity is one form split across tabs: artwork, then the name and its sidebar typography, then the
@@ -2693,6 +2746,7 @@ function OrgBanksPanel({ toast }: { toast: Toast }) {
     if (await save({ currencies: allowed, default_currency: def, currency_decimals, banks: bankList }, "Banks & currency saved")) markSaved();
   }
 
+  if (!ready) return <PanelSkeleton />; // see QuickActionsTab: no live inputs before the blob lands
   return (
     <div>
       <Card>
@@ -2797,6 +2851,7 @@ function OrgLetterDefaultsPanel({ toast }: { toast: Toast }) {
     if (await save({ letter_defaults: letterDefaults }, "Letter defaults saved")) markSaved();
   }
 
+  if (!ready) return <PanelSkeleton />; // see QuickActionsTab: no live inputs before the blob lands
   return (
     <div>
       <Tabs defaultValue="signatory">
@@ -2914,8 +2969,17 @@ function DashboardTab({ toast }: { toast: Toast }) {
   const [openCats, setOpenCats] = useState<Set<KpiCategory>>(new Set());
   const toggleCat = (cat: KpiCategory) => setOpenCats((s) => { const n = new Set(s); n.has(cat) ? n.delete(cat) : n.add(cat); return n; });
   useEffect(() => {
-    getSetting<DashboardConfig>("dashboard").then((s) => setCfg(s.value ?? {})).catch(() => {}).finally(() => setReady(true));
+    // Ready only on a read that landed: this editor saves the whole blob, so a form built on a failed read
+    // would write its defaults over the org's real dashboard config.
+    getSettingForEdit<DashboardConfig>("dashboard").then(
+      (s) => {
+        setCfg(s.value ?? {});
+        setReady(true); // batched with setCfg, so the unsaved baseline captures the loaded value
+      },
+      () => toast({ variant: "destructive", title: "Couldn't load the dashboard settings", description: "Reload the page before editing; nothing here can be saved until they load." }),
+    );
     list<{ name: string }>("roles").then((r) => setRoles(r.results ?? [])).catch(() => setRoles([]));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- read once at mount
   }, []);
   const setAud = (section: DashSection, key: string, aud: Audience) =>
     setCfg((c) => ({ ...c, [section]: { ...(c[section] ?? {}), [key]: aud } }));
@@ -3061,6 +3125,9 @@ function DashboardTab({ toast }: { toast: Toast }) {
       </div>
     );
   };
+  // No live checkboxes before the config lands: a band unticked on the empty defaults was put straight back by
+  // the hydration, so the switch the admin threw (and saved) was not the one on screen.
+  if (!ready) return <PanelSkeleton />;
   return (
     <Card>
       <CardHeader>
@@ -3334,6 +3401,7 @@ function EmployeeIdsTab({ toast }: { toast: Toast }) {
     }
   }
 
+  if (!ready) return <PanelSkeleton />; // see QuickActionsTab: no live inputs before the stored value lands
   return (
     <Card>
       <CardContent className="space-y-4 pt-4 sm:pt-6">

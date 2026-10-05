@@ -1,4 +1,4 @@
-import { gotoRoute, test, expect, makeThrowawayPerson, retireThrowawayPerson, allowConsoleErrors, searchBox } from "./fixtures";
+import { gotoRoute, test, expect, makeThrowawayPerson, retireThrowawayPerson, allowConsoleErrors, searchBox, searchPanel } from "./fixtures";
 
 // The phone, measured rather than reasoned about.
 //
@@ -254,5 +254,23 @@ test.describe("phone", () => {
       return { drawn: range.getBoundingClientRect().width, typed: ctx.measureText(input.value).width };
     });
     expect(Math.abs(widths.drawn - widths.typed)).toBeLessThanOrEqual(1);
+  });
+
+  // Typing filter words is hardest on a phone, so the filter bar is there too: the modal's last row, which sits
+  // just above the on-screen keyboard, and a tap writes the filter into the box.
+  test("the search's filter bar sits at the foot of the phone's search, and a tap narrows", async ({ as }) => {
+    const page = await as("super");
+    await gotoRoute(page, "dashboard");
+    await page.getByRole("banner").getByRole("button", { name: "Search", exact: true }).tap();
+    const search = searchBox(page);
+    await search.fill("leave");
+    const panel = searchPanel(page);
+    const keys = panel.getByRole("group", { name: "Narrow the results" });
+    await expect(keys).toBeVisible();
+    const [bar, box] = await Promise.all([keys.boundingBox(), panel.boundingBox()]);
+    expect(box!.y + box!.height - (bar!.y + bar!.height), "the filter bar is not the panel's last row").toBeLessThanOrEqual(16);
+    await keys.getByRole("button", { name: "When", exact: true }).tap();
+    await panel.getByRole("group", { name: "When choices" }).getByRole("button", { name: /^Today/ }).tap();
+    await expect(search).toHaveValue("leave on:today ");
   });
 });

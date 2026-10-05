@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import { readPref, refetchPref, writePref } from "@/lib/prefs";
+import { useToast } from "@/components/ui/use-toast";
+import { readPref, updatePref } from "@/lib/prefs";
 
 // Searches a person saved by name, run again from a chip at the front of the search's chip row
 // (CommandPalette.tsx). Stored in the caller's own `preferences` row, so they follow the person to another
@@ -38,9 +39,8 @@ const listOf = (v: unknown): SavedSearch[] => {
 
 /**
  * The caller's saved searches, read the first time `enabled` is true (the search being opened - not on every
- * page load), and the ways to change them. Every change re-reads the stored list first and writes it back
- * whole: it is ONE list that every device appends to, and the page-life snapshot can be older than a save made
- * on another machine since (lib/prefs.ts refetchPref says why that loses writes).
+ * page load), and the ways to change them. Every change goes through `updatePref`: it is ONE list that every
+ * device appends to, so it is re-read before the edit and written back guarded on that read (lib/prefs.ts).
  */
 export function useSavedSearches(enabled: boolean) {
   const [saved, setSaved] = useState<SavedSearch[]>([]);
@@ -54,11 +54,17 @@ export function useSavedSearches(enabled: boolean) {
     };
   }, [enabled]);
 
+  const { toast } = useToast();
+  // A change that cannot be made safely (the stored list could not be read, or kept changing underneath) is
+  // refused and said so, never written from a guess: the list on screen stays what is stored.
   const change = useCallback(async (update: (list: SavedSearch[]) => SavedSearch[]) => {
-    const next = update(listOf(await refetchPref<unknown>(PREF_KEY)));
-    setSaved(next);
-    await writePref(PREF_KEY, { searches: next });
-  }, []);
+    try {
+      const next = await updatePref<Stored>(PREF_KEY, (v) => ({ searches: update(listOf(v)) }));
+      setSaved(listOf(next));
+    } catch {
+      toast({ variant: "destructive", title: "Saved searches not changed", description: "They couldn't be read just now. Try again in a moment." });
+    }
+  }, [toast]);
 
   const save = useCallback(
     (s: Omit<SavedSearch, "id">) =>

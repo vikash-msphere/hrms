@@ -35,13 +35,13 @@ export function PunctualityPolicyPanel() {
   const { toast } = useToast();
   const { sched } = useClock();
   const [policy, setPolicy] = useState<PunctualityPolicy>(DEFAULT_PUNCTUALITY);
-  const [version, setVersion] = useState<string | undefined>();
+  const [version, setVersion] = useState<string | null>(null); // null = no row read, so a save may only create
   const [ready, setReady] = useState(false);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     getSetting<unknown>("punctuality")
-      .then((s) => { setPolicy(punctualityPolicyOf(s.value)); setVersion(s.version); })
+      .then((s) => { setPolicy(punctualityPolicyOf(s.value)); setVersion(s.version ?? null); })
       .catch(() => { /* nothing saved yet: the defaults stand, and they are what the server reads too */ })
       .finally(() => setReady(true));
   }, []);
@@ -58,9 +58,7 @@ export function PunctualityPolicyPanel() {
     try {
       // The WHOLE policy, every leaf explicit, against the version this panel read - so a save never leaves a
       // leaf to a default that could change under it, and never overwrites somebody else's save unseen.
-      await saveSetting("punctuality", { value: policy }, version);
-      const fresh = await getSetting<unknown>("punctuality");
-      setVersion(fresh.version);
+      setVersion((await saveSetting("punctuality", { value: policy }, version)) ?? null);
       markSaved();
       toast({ title: "Late & early policy saved", variant: "success" });
     } catch (e) {

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { readPref, writePref } from "@/lib/prefs";
+import { prefsKnown, readPref, writePref } from "@/lib/prefs";
 import { readLocal, writeLocal } from "@/lib/localPref";
 
 // Theme preference. The server (per-user `preferences/theme` row, read through the shared prefs snapshot in
@@ -39,7 +39,10 @@ export async function syncThemeFromServer() {
     }
     return;
   }
-  // No row yet (or a malformed one) -> seed the server from this browser so other devices pick it up.
+  // No row yet (or a malformed one) -> seed the server from this browser so other devices pick it up. Only
+  // when the read landed: after a failed one the theme reads as absent whatever is stored, and the seed would
+  // be a value built on nothing (refused create-only, lib/prefs.ts `snapshotUnknown`).
+  if (!(await prefsKnown())) return;
   persistToServer(getStoredTheme());
 }
 

@@ -2,7 +2,8 @@ import { and, count, eq } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { invalidArgument, notFound } from "../lib/errors";
+import { aborted, invalidArgument, notFound } from "../lib/errors";
+import { etagOf } from "../http/serialize";
 import { paginate } from "../http/pagination";
 import { PUSH_PREF_KEY, MAX_PUSH_DEVICES, pushEndpointAllowed } from "./webPush";
 
@@ -72,27 +73,51 @@ function validateValue(key: string, value: unknown): void {
 
 // Upsert: create the caller's preference for this key, or replace its value.
 //
-// ONE statement, resolved by the (userId, key) unique index rather than by looking first. A person is more
-// than one session - a second tab, a phone, the theme being written the moment two of them load - and a
-// look-then-insert loses that race against its own index, which surfaced as a 500 on something as ordinary
-// as remembering the theme. `createdAt` survives the conflict path, so the row keeps the day it was made.
-export async function upsertPreference(deps: Deps, actor: AppUser, key: string, value: unknown) {
+// With neither validator it is ONE statement, resolved by the (userId, key) unique index rather than by
+// looking first. A person is more than one session - a second tab, a phone, the theme being written the moment
+// two of them load - and a look-then-insert loses that race against its own index, which surfaced as a 500 on
+// something as ordinary as remembering the theme. `createdAt` survives the conflict path, so the row keeps the
+// day it was made.
+//
+// The validators are for a caller whose value is built FROM a read, exactly as on settings
+// (services/settings.ts#upsertSetting). `If-Match` names the version the value was built on, and the UPDATE
+// only lands while the row is still at it. `If-None-Match: *` is the caller that read NO row - including one
+// whose read failed and so cannot tell - and it may only create: a value built on nothing must never replace a
+// list another device appended to (push subscriptions, saved searches) or a layout the person built up.
+export async function upsertPreference(deps: Deps, actor: AppUser, key: string, value: unknown, ifMatch?: string, ifNoneMatch?: string) {
   validateValue(key, value);
   const json = JSON.stringify(value ?? {});
   if (json.length > MAX_PREFERENCE_BYTES) {
     throw invalidArgument(`preference value too large (max ${Math.floor(MAX_PREFERENCE_BYTES / 1024)} KiB)`);
   }
-  // Counted only when the key is NEW to this user, so an ordinary rewrite (the theme, a table layout) stays
-  // the single statement below. The count is the cheap aggregate, not the rows.
-  const existing = (
-    await deps.db
-      .select({ n: count() })
-      .from(schema.preferences)
-      .where(and(eq(schema.preferences.userId, actor.uuid), eq(schema.preferences.key, key)))
-  )[0]?.n ?? 0;
+  const mine = and(eq(schema.preferences.userId, actor.uuid), eq(schema.preferences.key, key));
+  // Looked up only to count a NEW key and to check a validator, so an ordinary rewrite (the theme, a table
+  // layout) stays the single statement below plus this one indexed read.
+  const existing = (await deps.db.select({ updatedAt: schema.preferences.updatedAt }).from(schema.preferences).where(mine).limit(1))[0];
+  if (existing && ifNoneMatch?.trim() === "*") throw aborted("the preference was created elsewhere; read it again and retry");
+  if (!existing && ifMatch) throw aborted("etag mismatch");
   if (!existing) {
     const held = (await deps.db.select({ n: count() }).from(schema.preferences).where(eq(schema.preferences.userId, actor.uuid)))[0]?.n ?? 0;
     if (held >= MAX_PREFERENCE_KEYS) throw invalidArgument(`at most ${MAX_PREFERENCE_KEYS} preferences may be stored`);
+  }
+  if (existing && ifMatch) {
+    // COMPARE-AND-SWAP on the version read, so a write that loses the race is refused by the DB, not by a read
+    // that may already be stale.
+    if (ifMatch !== etagOf(+new Date(existing.updatedAt))) throw aborted("etag mismatch");
+    const [updated] = await deps.db
+      .update(schema.preferences)
+      .set({ value: json, updatedAt: new Date() })
+      .where(and(mine, eq(schema.preferences.updatedAt, existing.updatedAt)))
+      .returning();
+    if (!updated) throw aborted("etag mismatch");
+    return updated;
+  }
+  if (ifNoneMatch?.trim() === "*") {
+    // Create-only, and still one statement against the unique index: a create that loses the race to another
+    // session's finds the row there and is refused rather than overwriting it.
+    const [created] = await deps.db.insert(schema.preferences).values({ userId: actor.uuid, key, value: json }).onConflictDoNothing().returning();
+    if (!created) throw aborted("the preference was created elsewhere; read it again and retry");
+    return created;
   }
   const [row] = await deps.db
     .insert(schema.preferences)

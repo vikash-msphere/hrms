@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { ChevronDown, Info, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { PanelSkeleton } from "@/components/common/Skeletons";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { SearchInput } from "@/components/common/SearchInput";
@@ -828,6 +829,8 @@ export function AiSettingsTab() {
     );
   }
 
+  // No live inputs before the stored value lands: a change made on the defaults was replaced by the hydration.
+  if (!ready) return <PanelSkeleton />;
   return (
     <Card>
       <CardHeader>

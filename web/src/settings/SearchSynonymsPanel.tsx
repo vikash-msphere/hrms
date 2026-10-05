@@ -26,7 +26,7 @@ const toGroup = (line: string) => line.split(",").map((t) => t.trim()).filter(Bo
 export function SearchSynonymsPanel() {
   const { toast } = useToast();
   const [lines, setLines] = useState<string[]>([]);
-  const [version, setVersion] = useState<string | undefined>();
+  const [version, setVersion] = useState<string | null>(null); // null = no row read, so a save may only create
   const [ready, setReady] = useState(false);
   const [saving, setSaving] = useState(false);
 
@@ -34,7 +34,7 @@ export function SearchSynonymsPanel() {
     const add = new URLSearchParams(window.location.search).get("add")?.trim();
     getSetting<SynonymsConfig>("search-synonyms")
       .then((s) => {
-        setVersion(s.version);
+        setVersion(s.version ?? null);
         const stored = (s.value?.groups ?? []).map(toLine);
         setLines(add ? [...stored, `${add}, `] : stored);
       })
@@ -50,9 +50,8 @@ export function SearchSynonymsPanel() {
   async function save() {
     setSaving(true);
     try {
-      await saveSetting("search-synonyms", { value: { groups: complete } }, version);
       // The next save writes against what this one left, not against the version the panel opened on.
-      setVersion((await getSetting<SynonymsConfig>("search-synonyms")).version);
+      setVersion((await saveSetting("search-synonyms", { value: { groups: complete } }, version)) ?? null);
       markSaved();
       toast({ title: "Saved", description: "Search uses these from the next search on.", variant: "success" });
     } catch (e) {

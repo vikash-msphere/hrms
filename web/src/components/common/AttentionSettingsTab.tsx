@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { AlertTriangle } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { PanelSkeleton } from "@/components/common/Skeletons";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -95,6 +96,8 @@ export function AttentionSettingsTab() {
     }
   }
 
+  // No live inputs before the stored value lands: a change made on the defaults was replaced by the hydration.
+  if (!ready) return <PanelSkeleton />;
   return (
     <Card>
       <CardHeader>

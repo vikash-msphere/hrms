@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { applySuggestion, collectionsNamedBy, editDistance, highlightParts, highlightTokens, isNarrowed, looksLikeQuestion, nearPeople, parsePaletteQuery, pushRecent, rankKindOffers, searchParams, suggestFilters, tokenAt, type FilterVocabulary, type KindSignals } from "../web/src/lib/paletteQuery";
+import {
+  applyFacetPick, applySuggestion, collectionsNamedBy, editDistance, facetOf, facetOffers, filtersForWords, handleFor, highlightParts, highlightTokens, isNarrowed,
+  looksLikeQuestion, nearPeople, parsePaletteQuery, pushRecent, rankKindOffers, searchParams, suggestFilters, tokenAt, whenCounts, whenPresets,
+  type Facet, type FilterContext, type FilterVocabulary, type KindSignals,
+} from "../web/src/lib/paletteQuery";
 import { collectionsOnRoute } from "../web/src/lib/resourceRoute";
 
 const people = [
@@ -222,6 +226,18 @@ describe("filter suggestions", () => {
     expect(tokens("laptop?")).toBeNull();
   });
 
+  it("reads a box that starts with ? as a question about the filters alone, narrowed by what follows", () => {
+    // The whole box is the span, wherever the caret is, so taking a row replaces all of it.
+    expect(suggestFilters("? date", 1, ctx)).toMatchObject({ start: 0, end: 6 });
+    expect(tokens("?created")).toEqual(["after:", "before:", "on:", "during:"]);
+    expect(tokens("  ? person")).toEqual(["@"]);
+    // Every word must match, and the words are not filters: `? is:mine` finds the filter, it does not use it up.
+    expect(tokens("? records status")).toEqual(["status:"]);
+    expect(tokens("? is:mine")).toEqual(["is:"]);
+    expect(tokens("?zzz")).toEqual([]);
+    expect(applySuggestion("? date", { start: 0, end: 6 }, "after:")).toEqual({ query: "after:", caret: 6 });
+  });
+
   it("offers on a lone - the filters it can turn round", () => {
     expect(tokens("-")).toEqual(["-in:", "-@", "-is:", "-dept:", "-status:"]);
     // Leaving one person out does not use up -@: another can follow.
@@ -277,6 +293,140 @@ describe("filter suggestions", () => {
       notIn: ["holidays"], notStatuses: ["approved"], team: true, dept: "sales-marketing", sort: "new", after: "2026-09-27", before: "2026-09-28", text: "",
     });
     expect(collectionsNamedBy("leave", ["leave-requests", "leave-types", "tickets"])).toEqual(["leave-requests", "leave-types"]);
+  });
+
+  it("completes a bare @ to you, your team and your reports, before a letter is typed", () => {
+    const self = { reports: [people[2]!] }; // Alice Kapoor reports to the caller
+    expect(tokens("@", 1, { ...ctx, self })).toEqual(["is:mine", "is:team", "@alice"]);
+    expect(tokens("@", 1, { ...ctx, self: { reports: [] } })).toEqual(["is:mine"]); // no team to offer
+    expect(tokens("-@", 2, { ...ctx, self })).toEqual(["-is:mine", "-is:team", "-@alice"]);
+    expect(tokens("is:mine @", 9, { ...ctx, self })).toBeNull(); // an owner is already there
+    expect(tokens("-is:mine -@", 11, { ...ctx, self })).toEqual(["-is:team", "-@alice"]);
+    expect(tokens("@", 1, { ...ctx, self: null })).toBeNull(); // no employee record: nobody is "you"
+  });
+});
+
+describe("the filter bar", () => {
+  const vocabulary: FilterVocabulary = [
+    { collection: "leave-requests", statuses: ["pending", "approved"] },
+    { collection: "leave-types", statuses: [] },
+    { collection: "tickets", statuses: ["open", "in_progress", "pending"] },
+    { collection: "holidays", statuses: [] },
+  ];
+  const labels: Record<string, string> = { "leave-requests": "Leave requests", "leave-types": "Leave types", tickets: "Tickets", holidays: "Holidays" };
+  const kinds = vocabulary.map((v) => v.collection);
+  type Person = (typeof people)[number];
+  // Alice Kapoor reports to the caller; the org-local day is Monday 5 October 2026.
+  const ctx: FilterContext<Person> = { people, vocabulary, labelOf: (c) => labels[c]!, today: "2026-10-05", daysAgo30: "2026-09-05", self: { reports: [people[2]!] } };
+  const offers = (facet: Facet, raw: string, leaveOut = false, over: Partial<FilterContext<Person>> = {}) =>
+    facetOffers(facet, raw, { ...ctx, ...over, leaveOut }).map((o) => `${o.suggestion.token}${o.pressedBy.length ? "*" : ""}`);
+  const words = (raw: string, over: Partial<FilterContext<Person>> & { scope?: string[] } = {}) =>
+    filtersForWords(raw, { ...ctx, kinds, ...over }).map((w) => [w.words, w.suggestion.token]);
+
+  it("knows which key a filter word belongs to, and which words are not filters", () => {
+    expect(facetOf("in:tickets")).toEqual({ facet: "kind", negate: false });
+    expect(facetOf("-@priya")).toEqual({ facet: "who", negate: true });
+    expect(facetOf("IS:mine")).toEqual({ facet: "who", negate: false });
+    expect(facetOf("during:2026")).toEqual({ facet: "when", negate: false });
+    expect(facetOf("sort:new")).toEqual({ facet: "sort", negate: false });
+    // No - form for the dates and the order; a bare key, a bare @ and a plain word are not filters yet.
+    for (const w of ["-after:7d", "-sort:new", "status:", "@", "laptop", "constructor:x"]) expect(facetOf(w)).toBeNull();
+  });
+
+  it("offers a key's choices with the ones already in the box pressed, never left out as used", () => {
+    expect(offers("kind", "laptop in:tickets")).toEqual(["in:holidays", "in:leave-requests", "in:leave-types", "in:tickets*"]);
+    // A word naming several kinds presses each of them.
+    expect(offers("kind", "in:leave")).toEqual(["in:holidays", "in:leave-requests*", "in:leave-types*", "in:tickets"]);
+    expect(offers("status", "status:pending laptop")).toEqual(["status:pending*", "status:approved", "status:in_progress", "status:open"]);
+    // A category's in: words, passed in, scope the statuses.
+    expect(offers("status", "laptop in:leave-requests")).toEqual(["status:approved", "status:pending"]);
+    const departments = [{ name: "Engineering" }, { name: "Sales" }];
+    expect(offers("dept", "dept:Sales", false, { departments })).toEqual(["dept:engineering", "dept:sales*"]);
+    expect(offers("when", "laptop after:7d")).toEqual(whenPresets(ctx.today).map((p) => (p.token === "after:7d" ? `${p.token}*` : p.token)));
+  });
+
+  it("offers the - form when leaving out, never what the box keeps", () => {
+    expect(offers("kind", "in:tickets -in:holidays", true)).toEqual(["-in:holidays*", "-in:leave-requests", "-in:leave-types"]);
+    expect(offers("status", "-status:open", true)).toEqual(["-status:pending", "-status:approved", "-status:in_progress", "-status:open*"]);
+    expect(offers("who", "is:mine", true)).toEqual(["-is:team", "-@alice"]);
+    expect(offers("when", "", true)).toEqual(whenPresets(ctx.today).map((p) => p.token)); // no - form: kept as is
+  });
+
+  it("offers you, your team and your reports for Who, with anybody already named", () => {
+    expect(offers("who", "")).toEqual(["is:mine", "is:team", "@alice"]);
+    expect(offers("who", "@priya leave")).toEqual(["is:mine", "is:team", "@priya*", "@alice"]);
+    expect(offers("who", "", false, { self: { reports: [] } })).toEqual(["is:mine"]);
+    expect(offers("who", "", false, { self: null })).toEqual([]);
+    // Left out, a person is not offered as the owner.
+    expect(offers("who", "-@alice")).toEqual(["is:mine", "is:team"]);
+  });
+
+  it("offers nothing in the ? guide", () => {
+    expect(offers("kind", "?")).toEqual([]);
+    expect(words("? pending")).toEqual([]);
+  });
+
+  it("writes a press into the box: in, out again, or in place of the key's one value", () => {
+    expect(applyFacetPick("laptop", { token: "in:tickets", pressedBy: [] })).toBe("laptop in:tickets ");
+    expect(applyFacetPick("laptop in:tickets in:holidays", { token: "in:leave", pressedBy: [] })).toBe("laptop in:tickets in:holidays in:leave ");
+    expect(applyFacetPick("laptop in:Tickets ", { token: "in:tickets", pressedBy: ["in:Tickets"] })).toBe("laptop ");
+    expect(applyFacetPick("status:open laptop", { token: "status:pending", pressedBy: [] })).toBe("laptop status:pending ");
+    expect(applyFacetPick("-status:open laptop", { token: "status:pending", pressedBy: [] })).toBe("-status:open laptop status:pending ");
+    expect(applyFacetPick("-status:open laptop", { token: "-status:pending", pressedBy: [] })).toBe("-status:open laptop -status:pending ");
+    // The dates are one window, the owners one owner.
+    expect(applyFacetPick("after:7d laptop on:today", { token: "during:2026", pressedBy: [] })).toBe("laptop during:2026 ");
+    expect(applyFacetPick("@priya leave", { token: "is:mine", pressedBy: [] })).toBe("leave is:mine ");
+    expect(applyFacetPick("leave", { token: "sort:new", pressedBy: [] })).toBe("leave sort:new ");
+    expect(applyFacetPick("leave sort:new ", { token: "sort:new", pressedBy: ["sort:new"] })).toBe("leave ");
+    expect(applyFacetPick("", { token: "in:tickets", pressedBy: [] })).toBe("in:tickets ");
+  });
+
+  it("counts the results each When choice would keep, by the window the search reads it as", () => {
+    const counts = whenCounts(["2026-10-05", "2026-10-04", "2026-09-30", "2026-09-01", "2025-12-31"], "2026-10-05");
+    expect(Object.fromEntries(counts)).toEqual({
+      "on:today": 1, "on:yesterday": 1, "after:7d": 3, "after:30d": 3, "during:2026-10": 2, "during:2026-09": 2, "during:2026": 4, "before:2026-01": 1,
+    });
+  });
+
+  it("offers the filter a typed word names, by its exact name only", () => {
+    expect(words("pending leave priya")).toEqual([["pending", "status:pending"], ["leave", "in:leave"], ["priya", "@priya"]]);
+    expect(filtersForWords("laptop pending", { ...ctx, kinds })[0]).toMatchObject({ start: 7, end: 14, words: "pending" });
+    expect(words("ticket holiday")).toEqual([["ticket", "in:tickets"], ["holiday", "in:holidays"]]);
+    expect(filtersForWords("leave", { ...ctx, kinds })[0]!.suggestion).toMatchObject({ kind: "in", named: ["leave-requests", "leave-types"] });
+    // Half a word, or the start of a name, names nothing.
+    expect(words("pend lea pri")).toEqual([]);
+    expect(words("kapoor")).toEqual([["kapoor", "@alice"]]); // a surname names the person too
+    expect(words("sales", { departments: [{ name: "Sales" }] })).toEqual([["sales", "dept:sales"]]);
+  });
+
+  it("offers owners, dates and the order for the words that mean them", () => {
+    expect(words("my payslips")).toEqual([["my", "is:mine"]]);
+    expect(words("my team leave")).toEqual([["my team", "is:team"], ["leave", "in:leave"]]);
+    expect(words("my", { self: null })).toEqual([]);
+    expect(words("newest")).toEqual([["newest", "sort:new"]]);
+    expect(words("today")).toEqual([["today", "on:today"]]);
+    // The latest such month not after this one: in October 2026, September is this year's and November last year's.
+    expect(words("september")).toEqual([["september", "during:2026-09"]]);
+    expect(words("nov")).toEqual([["nov", "during:2025-11"]]);
+    expect(filtersForWords("september", { ...ctx, kinds })[0]!.suggestion).toMatchObject({ kind: "date", label: "September 2026" });
+    expect(words("last month")).toEqual([["last month", "during:2026-09"]]);
+    expect(words("this year 2025 2027")).toEqual([["this year", "during:2026"], ["2025", "during:2025"]]);
+  });
+
+  it("offers nothing more for a key the box already sets, and scopes statuses to the kinds in play", () => {
+    expect(words("pending status:open")).toEqual([]);
+    expect(words("september after:7d")).toEqual([]);
+    expect(words("priya is:mine")).toEqual([]);
+    expect(words("leave in:leave")).toEqual([]);
+    expect(words("open in:leave-requests")).toEqual([]); // leave requests are never open
+    expect(words("open", { scope: ["leave-requests"] })).toEqual([]);
+    expect(words("open", { scope: ["tickets"] })).toEqual([["open", "status:open"]]);
+  });
+
+  it("names a person by the shortest handle that means only them", () => {
+    expect(handleFor(people[0]!, people)).toBe("priya");
+    const twins = [...people, { id: "e4", first: "Priya", last: "Das" }];
+    expect(handleFor(twins[0]!, twins)).toBe("priyanair");
   });
 });
 

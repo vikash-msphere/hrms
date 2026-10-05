@@ -1,11 +1,11 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
-import { Search, ArrowLeft, User, Loader2, KeyRound, X, Sparkles, ListFilter, Lock, History, Check, Ban, CalendarDays, ChevronDown, Bookmark, Pin, PinOff } from "lucide-react";
+import { Search, ArrowLeft, User, Loader2, KeyRound, X, Sparkles, ListFilter, Lock, History, Check, Ban, CalendarDays, ChevronDown, Bookmark, BookmarkPlus, Pin, PinOff, WandSparkles } from "lucide-react";
 import { useConfirm } from "@/components/common/confirm";
 import { FilterChips, filterChipClass } from "@/components/common/FilterChips";
+import { ChipsSkeleton } from "@/components/common/Skeletons";
 import {
-  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator,
-  DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger,
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useToast } from "@/components/ui/use-toast";
 import { confirmDecision } from "@/lib/confirmDecision";
@@ -34,7 +34,11 @@ import type { OrgSettings } from "@/lib/org";
 import type { LucideIcon } from "lucide-react";
 import type { Department, Employee, Me, SearchHit, SearchPage } from "@/types";
 import { useAiFeature } from "@/lib/aiFeatures";
-import { GUIDE_WORD, applySuggestion, collectionsNamedBy, inWordOf, highlightParts, highlightTokens, isNarrowed, looksLikeQuestion, nearPeople, parsePaletteQuery, pushRecent, rankKindOffers, resolveDay, resolvePerson, searchParams, suggestFilters, tokenAt, type FilterSuggestion, type FilterVocabulary, type PalettePerson, type PaletteQuery } from "@/lib/paletteQuery";
+import {
+  GUIDE_WORD, applyFacetPick, applySuggestion, collectionsNamedBy, facetOf, facetOffers, filtersForWords, inWordOf, highlightParts, highlightTokens, isGuideQuery,
+  isNarrowed, looksLikeQuestion, nearPeople, parsePaletteQuery, pushRecent, rankKindOffers, resolveDay, resolvePerson, searchParams, suggestFilters, tokenAt, whenCounts,
+  type Facet, type FacetOffer, type FilterContext, type FilterSuggestion, type FilterVocabulary, type PalettePerson, type PaletteQuery, type WordFilter,
+} from "@/lib/paletteQuery";
 import { addDaysYmd, orgDayFromToday, stampDay, todayStr, weekStartYmd } from "@/lib/orgDay";
 
 // One row of the palette. Everything the palette can offer - a create flow, a page, a settings panel, or an
@@ -350,6 +354,45 @@ function filterItem(s: FilterSuggestion<{ id: string; first: string; last: strin
   }
 }
 
+// One of a filter bar key's choices as it reads there: the bare value, since the key it sits under and the Keep /
+// Leave out switch beside it say the rest ("Pending", not "Except Status: Pending").
+function choiceLabel(s: FilterSuggestion): string {
+  switch (s.kind) {
+    case "in":
+      return entityLabel(s.collection);
+    case "status":
+      return statusLabel(s.status);
+    case "person":
+      return `${s.person.first} ${s.person.last}`.trim();
+    case "is":
+      return s.value === "team" ? "My team" : "Me";
+    case "dept":
+      return s.department.name;
+    case "sort":
+      return "Newest first";
+    case "date":
+    case "key":
+      return s.label;
+  }
+}
+
+// A filter offered for typed words ("Filter by"), as its pill will read once it is taken - "Status: Pending",
+// "Priya Shah", "Mine" - with a word that names several kinds saying how many.
+function wordFilterLabel(s: FilterSuggestion): string {
+  switch (s.kind) {
+    case "in":
+      return s.named ? `${entityLabel(s.token.slice(s.token.indexOf(":") + 1))} · ${s.named.length} kinds` : entityLabel(s.collection);
+    case "status":
+      return `Status: ${statusLabel(s.status)}`;
+    case "dept":
+      return `Department: ${s.department.name}`;
+    case "is":
+      return s.value === "team" ? "My team" : "Mine";
+    default:
+      return choiceLabel(s);
+  }
+}
+
 /** A row's label or detail with the typed words marked where they matched (lib/paletteQuery.ts highlightParts). */
 function Marked({ text, tokens }: { text: string; tokens: readonly string[] }) {
   return (
@@ -385,12 +428,28 @@ function searchScopes(me: Me): { scope: Exclude<Scope, "all">; label: string; co
   });
 }
 
-// The Filters menu: the narrowings worth a click, each one a filter word the search already reads.
-type Refine = { owner: "" | "mine" | "team"; since: "" | "7d" | "30d" | "365d"; sort: "" | "new" };
-const NO_REFINE: Refine = { owner: "", since: "", sort: "" };
-const OWNER_LABEL: Record<Refine["owner"], string> = { "": "Anyone", mine: "Mine", team: "My team" };
-const SINCE_LABEL: Record<Refine["since"], string> = { "": "Any time", "7d": "Last 7 days", "30d": "Last 30 days", "365d": "Last 12 months" };
-const SORT_LABEL: Record<Refine["sort"], string> = { "": "Best match", new: "Newest first" };
+// A saved search also stores `refine` - an owner, a window and an order - which older saves fill in and new ones
+// leave empty: those choices are filter words in the box, where the filter bar writes them. Running a saved
+// search turns any it holds into those words (`refineAsWords`). lib/savedSearches.ts requires the field.
+const EMPTY_REFINE: SavedSearch["refine"] = { owner: "", since: "", sort: "" };
+/** A saved search's stored owner, window and order as the filter words they mean, less a key the words hold. */
+function refineAsWords(refine: SavedSearch["refine"], query: string): string {
+  return [
+    (refine.owner === "mine" || refine.owner === "team") && !/(^|\s)(is:|@)\S/i.test(query) ? `is:${refine.owner}` : "",
+    /^\d{1,4}d$/.test(refine.since) && !/(^|\s)(after|before|on|during):\S/i.test(query) ? `after:${refine.since}` : "",
+    refine.sort === "new" && !/(^|\s)sort:\S/i.test(query) ? "sort:new" : "",
+  ].filter(Boolean).join(" ");
+}
+
+// The filter bar's keys, as it names them; a key's choices are lib/paletteQuery.ts facetOffers.
+const FACET_LABEL: Record<Facet, string> = { kind: "Kind", who: "Who", dept: "Department", status: "Status", when: "When" };
+// The keys whose choices are a long list: after their choices, one more hands over to typing the key in the box,
+// where its completions narrow as letters are typed.
+const HAND_OFF: Partial<Record<Facet, { key: string; label: string }>> = {
+  kind: { key: "in:", label: "Find a kind…" },
+  who: { key: "@", label: "Someone else…" },
+  dept: { key: "dept:", label: "Find a department…" },
+};
 
 // How a search ends: dismissed (Esc), or done (something was opened) - the inline field lets go of focus on
 // the second, so the page's own shortcuts work again, and keeps it on the first, ready for another try.
@@ -452,39 +511,47 @@ function usePaletteSearch({ me, open, close }: { me: Me; open: boolean; close: (
   const { rows: employees } = useCollection<Employee>("employees", { all: true, enabled: opened });
   // The directory as `@name` and "did you mean" read it.
   const directory = useMemo(() => employees.map((e) => ({ id: idOf(e.path), first: e.first_name ?? "", last: e.last_name ?? "", e })), [employees]);
-  // The category chip and the Filters menu (PaletteChips). Both are narrowing the search already knows how to
-  // read - `in:`, `is:`, `after:`, `sort:` - so they are applied as those words, added to what was typed
-  // without being written into the box: the search cannot tell a chip from a typed filter, and the box keeps
-  // only what the person typed. Pages is not a narrowing of records but of what the palette lists, so it is
-  // read where the list is built instead.
+  // The category chip (PaletteChips): a narrowing the search already knows how to read - `in:` its collections -
+  // so it is applied as those words, added to what was typed without being written into the box. Pages is not a
+  // narrowing of records but of what the palette lists, so it is read where the list is built instead. Every
+  // other filter is a word in the box, typed or written there by the filter bar.
   const [scope, setScopeState] = useState<Scope>("all");
-  const [refine, setRefineState] = useState<Refine>(NO_REFINE);
   const scopes = useMemo(() => searchScopes(me), [me]);
-  const refineOn = refine.owner !== "" || refine.since !== "" || refine.sort !== "";
-  const refineWords = [refine.owner && `is:${refine.owner}`, refine.since && `after:${refine.since}`, refine.sort && `sort:${refine.sort}`].filter(Boolean).join(" ");
+  // The filter bar's open picker (FilterBar): which key, and whether its choices keep or leave out.
+  const [facet, setFacet] = useState<{ facet: Facet; leaveOut: boolean } | null>(null);
+  // The caller as an employee, and who reports to them: what Who and a bare `@` offer first. None for a caller
+  // with no employee record, to whom "mine" and "my team" mean nothing (routes/search.ts).
+  const reports = useMemo(
+    () => (me.employee_id ? directory.filter((d) => !!d.e.manager && idOf(d.e.manager) === me.employee_id) : []),
+    [directory, me.employee_id],
+  );
+  const self = useMemo(() => (me.employee_id ? { reports } : null), [me.employee_id, reports]);
   const askOn = useAiFeature("search.ask");
   const [ask, setAsk] = useState<AskState>({ status: "idle" });
   // An answer is about the question it was asked; editing the box makes it an answer to something else.
   useEffect(() => setAsk({ status: "idle" }), [query]);
 
   // What `in:` and `status:` can be completed with - the collections this caller may search, and their status
-  // values. Asked for the first time somebody types one of those two words, not on open: most searches never
-  // narrow, and the answer does not change within a session. A failure is asked again the next time.
+  // values. Asked for the first time somebody types one of those two words, types a word of three letters (which
+  // the filter bar may offer as the status or kind it names), or opens the Kind or Status picker - not on open:
+  // most opens go straight to a page, and the answer does not change within a session. A failure is asked again
+  // the next time.
   const [vocabulary, setVocabulary] = useState<FilterVocabulary | null>(null);
   const vocabularyAsked = useRef(false);
   useEffect(() => {
     setVocabulary(null);
     vocabularyAsked.current = false;
   }, [me.email]);
-  const wantsVocabulary = /^-?(in|status):/i.test(tokenAt(query, caret).text);
-  // The departments `dept:` completes with, read the first time somebody types it - the cached list every
-  // department picker shares, and only the ones this caller may list.
+  const wantsVocabulary = /^-?(in|status):/i.test(tokenAt(query, caret).text) || /(^|\s)[\p{L}\p{N}]{3}/u.test(query)
+    || facet?.facet === "kind" || facet?.facet === "status";
+  // The departments `dept:` completes with, read the first time somebody types it or opens the Department picker
+  // - the cached list every department picker shares, and only the ones this caller may list.
   const [wantedDepartments, setWantedDepartments] = useState(false);
-  const wantsDepartments = /^-?dept:/i.test(tokenAt(query, caret).text);
+  const wantsDepartments = /^-?dept:/i.test(tokenAt(query, caret).text) || facet?.facet === "dept";
   useEffect(() => {
     if (wantsDepartments) setWantedDepartments(true);
   }, [wantsDepartments]);
-  const { rows: departmentRows } = useCollection<Department>("departments", { all: true, enabled: wantedDepartments });
+  const { rows: departmentRows, state: departmentsState } = useCollection<Department>("departments", { all: true, enabled: wantedDepartments });
   const departments = useMemo(() => departmentRows.flatMap((d) => (d.display_name ? [{ name: d.display_name }] : [])), [departmentRows]);
   useEffect(() => {
     if (!wantsVocabulary || vocabulary || vocabularyAsked.current) return;
@@ -505,7 +572,7 @@ function usePaletteSearch({ me, open, close }: { me: Me; open: boolean; close: (
     setKindTotals(null);
     totalsAsked.current = false;
   }, [me.email]);
-  const wantsTotals = /^-?in:/i.test(tokenAt(query, caret).text);
+  const wantsTotals = /^-?in:/i.test(tokenAt(query, caret).text) || facet?.facet === "kind";
   useEffect(() => {
     if (!wantsTotals || kindTotals || totalsAsked.current) return;
     totalsAsked.current = true;
@@ -515,10 +582,15 @@ function usePaletteSearch({ me, open, close }: { me: Me; open: boolean; close: (
         totalsAsked.current = false;
       });
   }, [wantsTotals, kindTotals]);
-  const filterOffers = useMemo(
-    () => suggestFilters(query, caret, { people: directory, vocabulary, labelOf: entityLabel, today: todayStr(), daysAgo30: orgDayFromToday(-30), departments }),
-    [query, caret, directory, vocabulary, departments],
+  // What every filter offer is made from: the completions under the caret, and the filter bar's choices and the
+  // filters it reads in the typed words.
+  const filterCtx = useMemo(
+    (): FilterContext<(typeof directory)[number]> => ({
+      people: directory, vocabulary, labelOf: entityLabel, today: todayStr(), daysAgo30: orgDayFromToday(-30), departments, self,
+    }),
+    [directory, vocabulary, departments, self],
   );
+  const filterOffers = useMemo(() => suggestFilters(query, caret, filterCtx), [query, caret, filterCtx]);
   // What is searched while a filter word is being completed: everything BUT that word. Half a filter (`in:tic`)
   // names nothing yet, and searched as typed it emptied the list at the moment the person was choosing what to
   // narrow it to; without it, the list goes on showing what the rest of the words find. A word typed out in
@@ -529,8 +601,8 @@ function usePaletteSearch({ me, open, close }: { me: Me; open: boolean; close: (
     if (filterOffers.items.some((s) => s.token.toLowerCase() === word)) return query;
     return `${query.slice(0, filterOffers.start)} ${query.slice(filterOffers.end)}`.replace(/\s+/g, " ").trim();
   }, [query, filterOffers]);
-  // The filter words typed in the box, each as a pill that says what it means and takes it out again
-  // (PaletteChips) - beside the Filters menu's own, so every narrowing in force is in one line.
+  // The filter words in the box, each as a pill that says what it means and takes it out again (PaletteChips),
+  // so every narrowing in force is in one line, whether it was typed or written there by the filter bar.
   const kinds = useMemo(() => scopes.flatMap((s) => s.collections), [scopes]);
   const typedFilters = useMemo(
     () => typedFilterWords(query, filterOffers ? { start: filterOffers.start, end: filterOffers.end } : null).map((w) => ({
@@ -559,28 +631,32 @@ function usePaletteSearch({ me, open, close }: { me: Me; open: boolean; close: (
   const typedKinds = /(^|\s)-?in:\S/i.test(searchText);
   const scopeWords = typedKinds ? "" : scopes.find((s) => s.scope === scope)?.collections.map((c) => `in:${c}`).join(" ") ?? "";
   const parsed = useMemo(
-    () => parsePaletteQuery([searchText, scopeWords, refineWords].filter(Boolean).join(" "), directory, todayStr()),
-    [searchText, scopeWords, refineWords, directory],
+    () => parsePaletteQuery([searchText, scopeWords].filter(Boolean).join(" "), directory, todayStr()),
+    [searchText, scopeWords, directory],
   );
   const narrowed = isNarrowed(parsed);
   // The same words without the category: what the chips count against, whichever one is on.
   const unscoped = useMemo(
-    () => (scopeWords ? parsePaletteQuery([searchText, refineWords].filter(Boolean).join(" "), directory, todayStr()) : parsed),
-    [scopeWords, searchText, refineWords, directory, parsed],
+    () => (scopeWords ? parsePaletteQuery(searchText, directory, todayStr()) : parsed),
+    [scopeWords, searchText, directory, parsed],
   );
   // New text for the box that the person did not type (a completion, a recent search, See all), with the caret
-  // put where it belongs - the end, unless said otherwise - so the word being completed is the right one.
-  const replaceQuery = (text: string, at = text.length) => {
-    pendingCaret.current = at;
+  // put where it belongs - the end, unless said otherwise - so the word being completed is the right one. The box
+  // takes the focus with it, unless `focus` is false: a press from the filter bar made with the keyboard, whose
+  // focus stays in the bar.
+  const replaceQuery = (text: string, at = text.length, { focus = true }: { focus?: boolean } = {}) => {
+    if (focus) pendingCaret.current = at;
     setQuery(text);
     setCaret(at);
     setActive(0);
   };
   // Accepting a suggestion swaps the word under the caret for it and leaves the caret after it, ready for the
-  // next word. Read off the input itself so a row built a render ago still edits what is in the box now.
+  // next word - or, in a box that starts with `?`, swaps the whole box, since all of it was asking for the
+  // filter. Read off the input itself so a row built a render ago still edits what is in the box now.
   const acceptFilter = (token: string) => {
     const raw = inputRef.current?.value ?? query;
-    const next = applySuggestion(raw, tokenAt(raw, inputRef.current?.selectionStart ?? caret), token);
+    const span = isGuideQuery(raw) ? { start: 0, end: raw.length } : tokenAt(raw, inputRef.current?.selectionStart ?? caret);
+    const next = applySuggestion(raw, span, token);
     replaceQuery(next.query, next.caret);
   };
   useLayoutEffect(() => {
@@ -624,8 +700,9 @@ function usePaletteSearch({ me, open, close }: { me: Me; open: boolean; close: (
   // not name one person yet (lib/paletteQuery.ts `incomplete`).
   const plainWords = parsed.text.trim();
   const keyOf = (q: PaletteQuery) => (!q.incomplete && (plainWords.length >= 2 || (isNarrowed(q) && !plainWords)) ? searchParams(q) : "");
-  // Pages asks the server nothing: pages and settings panels are listed from the app itself.
-  const requestKey = scope === "pages" ? "" : keyOf(parsed);
+  // Pages asks the server nothing: pages and settings panels are listed from the app itself. Nor does a box
+  // that starts with `?`, which lists the filters alone, even under a category chip.
+  const requestKey = scope === "pages" || isGuideQuery(query) ? "" : keyOf(parsed);
   const unscopedKey = keyOf(unscoped);
   // WHICH request the hits on screen answer. Between a keystroke and the effect below flipping `searching`
   // there is a render where the hits are still the last query's (or none), and anything that concludes
@@ -753,33 +830,25 @@ function usePaletteSearch({ me, open, close }: { me: Me; open: boolean; close: (
   const kindAffinity = useKindAffinity(opened);
   const route = useRoute();
   const pageKinds = useMemo(() => collectionsOnRoute([route.page, route.id, route.sub].filter(Boolean).join("/")), [route.page, route.id, route.sub]);
-  // Running one puts back everything it was saved with - words, category, Filters menu - and leaves the caret
-  // after the words, ready for one more. A category or a filter value this caller no longer has falls back to
-  // none rather than to a narrowing they cannot see.
+  // Running one puts back everything it was saved with - words and category - and leaves the caret after the
+  // words, ready for one more. A category this caller no longer has falls back to none rather than to a
+  // narrowing they cannot see; an owner, window or order stored by an older save comes back as its words.
   const applySaved = (s: SavedSearch) => {
     const knownScope = s.scope === "all" || scopes.some((x) => x.scope === s.scope);
     setScopeState(knownScope ? (s.scope as Scope) : "all");
-    setRefineState({
-      owner: s.refine.owner in OWNER_LABEL ? (s.refine.owner as Refine["owner"]) : "",
-      since: s.refine.since in SINCE_LABEL ? (s.refine.since as Refine["since"]) : "",
-      sort: s.refine.sort in SORT_LABEL ? (s.refine.sort as Refine["sort"]) : "",
-    });
-    replaceQuery(s.query ? `${s.query} ` : "");
+    const words = [s.query, refineAsWords(s.refine, s.query)].filter(Boolean).join(" ");
+    replaceQuery(words ? `${words} ` : "");
   };
   // The name a new saved search is offered under, said the way its pills say it: "Time · Status: Pending · leave".
   const suggestedName = [
     ...(scope !== "all" && !typedKinds ? [scopes.find((s) => s.scope === scope)?.label ?? ""] : []),
     ...typedFilters.map((w) => w.label),
-    ...(refine.owner ? [OWNER_LABEL[refine.owner]] : []),
-    ...(refine.since ? [SINCE_LABEL[refine.since]] : []),
-    ...(refine.sort ? [SORT_LABEL[refine.sort]] : []),
     parsed.text.trim(),
   ].filter(Boolean).join(" · ") || "My search";
 
-  // Every narrowing off - the category, the Filters menu, and the filter words in the box - keeping the words.
+  // Every narrowing off - the category and the filter words in the box - keeping the words.
   const widen = () => {
     setScopeState("all");
-    setRefineState(NO_REFINE);
     replaceQuery(withoutTyped());
   };
 
@@ -808,6 +877,8 @@ function usePaletteSearch({ me, open, close }: { me: Me; open: boolean; close: (
     // The filter guide (`?`, a bare `-`) leads whatever list is showing: it is what was just asked for.
     const guide = filterOffers?.items[0]?.kind === "key" ? filterOffers.items.map((s) => filterItem(s, acceptFilter)) : null;
     const withGuide = (list: Section[]) => (guide ? [{ label: "Filters", items: guide }, ...list] : list);
+    // A box that starts with `?` asks only about the filters: the guide, narrowed by what follows, and nothing else.
+    if (isGuideQuery(query)) return guide ? [{ label: "Filters", items: guide }] : [];
     // The Pages chip: the app's own pages and settings panels, matched on the words (all of them for none).
     if (scope === "pages") {
       const text = parsed.text.trim().toLowerCase();
@@ -818,7 +889,7 @@ function usePaletteSearch({ me, open, close }: { me: Me; open: boolean; close: (
     }
     // A category or a filter with nothing typed is a question too - the newest records it names - so only the
     // bare box shows the catalogue.
-    if (!q && scope === "all" && !refineOn) {
+    if (!q && scope === "all") {
       // Empty query: this user's most-opened targets first, then the full catalogue.
       const all = [...local.actions, ...local.pages, ...local.settings];
       const recent = all
@@ -1018,8 +1089,6 @@ function usePaletteSearch({ me, open, close }: { me: Me; open: boolean; close: (
       const letGo = [
         ...(scope !== "all" && !typedKinds ? [scopes.find((s) => s.scope === scope)?.label ?? ""] : []),
         ...typedFilters.map((w) => w.label),
-        ...(refine.owner ? [OWNER_LABEL[refine.owner]] : []),
-        ...(refine.since ? [SINCE_LABEL[refine.since]] : []),
       ].filter(Boolean);
       out.push({
         label: "Nothing with these filters",
@@ -1056,7 +1125,7 @@ function usePaletteSearch({ me, open, close }: { me: Me; open: boolean; close: (
     // `runAsk` and `acceptFilter` read the same state this memo does, so listing them would only rebuild the
     // list twice.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [local, employees, directory, hits, searchText, parsed, narrowed, frecent, recentQueries, ask, askOn, settled, failed, failure, prefillable, actions, scope, refineOn, filterOffers, typedKinds, typedFilters, refine, scopes, kinds]);
+  }, [local, employees, directory, hits, query, searchText, parsed, narrowed, frecent, recentQueries, ask, askOn, settled, failed, failure, prefillable, actions, scope, filterOffers, typedKinds, typedFilters, scopes, kinds]);
 
   // What each category chip would show for these words. Counted against the answer WITHOUT the category -
   // the one All shows, asked alongside while a chip is on (countSeq above) - so pressing a chip never changes
@@ -1125,16 +1194,114 @@ function usePaletteSearch({ me, open, close }: { me: Me; open: boolean; close: (
     setActive(0);
     inputRef.current?.focus();
   };
-  const setRefine = (patch: Partial<Refine>) => {
-    setRefineState((r) => ({ ...r, ...patch }));
-    setActive(0);
-  };
   useEffect(() => {
     if (!open) {
       setScopeState("all");
-      setRefineState(NO_REFINE);
+      setFacet(null);
     }
   }, [open]);
+
+  // ---- The filter bar (FilterBar) ----
+  // Its keys show wherever records can be narrowed: not under Pages (pages are not records), not in a box that
+  // starts with `?` (the list is the filter list then), and not while a record's actions stand in for the list.
+  const barOn = !actions && scope !== "pages" && !isGuideQuery(query);
+  useEffect(() => {
+    if (!barOn) setFacet(null);
+  }, [barOn]);
+  // How many filters each key has on in the box, and whether the order is newest first.
+  const facetCounts = useMemo(() => {
+    const counts = new Map<Facet | "sort", number>();
+    for (const w of typedFilters) {
+      const f = facetOf(w.word);
+      if (f) counts.set(f.facet, (counts.get(f.facet) ?? 0) + 1);
+    }
+    return counts;
+  }, [typedFilters]);
+  const newestOn = typedFilters.some((w) => w.word.toLowerCase() === "sort:new");
+  // The keys, in one fixed order, less the ones that cannot narrow this search: Department for a caller who may
+  // not list departments, Status once the vocabulary says none of the kinds in play has one. A key with a filter
+  // on stays, whatever it is, so what is on can always be seen and changed where it was set.
+  const statusless = useMemo(() => {
+    if (!vocabulary) return false;
+    const inPlay = parsed.in.length ? new Set(parsed.in.flatMap((w) => collectionsNamedBy(w, vocabulary.map((v) => v.collection)))) : null;
+    return !vocabulary.some((v) => (!inPlay || inPlay.has(v.collection)) && v.statuses.length > 0);
+  }, [vocabulary, parsed]);
+  const facetKeys = !barOn ? [] : (["kind", "who", "dept", "status", "when"] as const)
+    .filter((f) => (facetCounts.get(f) ?? 0) > 0
+      || (f === "kind" ? kinds.length > 0 : f === "dept" ? !!me.scopes.read.departments : f === "status" ? !statusless : true))
+    .map((f) => ({ facet: f, label: FACET_LABEL[f], count: facetCounts.get(f) ?? 0 }));
+  // The open key's choices (lib/paletteQuery.ts facetOffers). Kinds come ranked as the `in:` completions are,
+  // with their counts, and the ones already on first; When is counted from the loaded results while no date
+  // filter is on (a count then would describe a set already cut down by one). Statuses are the category's too.
+  const facetChoices = useMemo(() => {
+    if (!facet || !barOn) return null;
+    const raw = facet.facet === "status" && scopeWords ? `${query} ${scopeWords}` : query;
+    const offers = facetOffers(facet.facet, raw, { ...filterCtx, leaveOut: facet.leaveOut });
+    type Choice = { offer: (typeof offers)[number]; count?: string; muted?: boolean };
+    if (facet.facet === "kind") {
+      const ranked = rankKindOffers(offers.flatMap((o) => (o.suggestion.kind === "in" ? [{ collection: o.suggestion.collection, o }] : [])), kindSignals);
+      const choices = ranked.map((r): Choice => ({ offer: r.offer.o, count: r.count, muted: r.muted }));
+      return [...choices.filter((c) => c.offer.pressedBy.length), ...choices.filter((c) => !c.offer.pressedBy.length)];
+    }
+    if (facet.facet === "when" && settled && requestKey && !parsed.after && !parsed.before) {
+      const counts = whenCounts(hits.flatMap((h) => (h.create_time ? [stampDay(h.create_time)] : [])), todayStr());
+      const capped = hits.length >= SERVER_TOTAL;
+      return offers.map((o): Choice => {
+        const n = counts.get(o.suggestion.token) ?? 0;
+        return { offer: o, count: `${n.toLocaleString()}${capped ? "+" : ""}`, muted: n === 0 };
+      });
+    }
+    return offers.map((o): Choice => ({ offer: o }));
+  }, [facet, barOn, query, scopeWords, filterCtx, kindSignals, settled, requestKey, parsed, hits]);
+  // Whether the open key's choices are still being read: the vocabulary for Kind and Status, the departments.
+  const facetLoading = facet?.facet === "kind" || facet?.facet === "status" ? !vocabulary
+    : facet?.facet === "dept" ? departmentsState === "loading" && departments.length === 0 : false;
+  // The filters the typed words name, for the bar's "Filter by" (lib/paletteQuery.ts filtersForWords).
+  const wordFilters = useMemo(
+    () => (barOn ? filtersForWords(query, { ...filterCtx, kinds, scope: scopeWords ? scopes.find((s) => s.scope === scope)?.collections : undefined }) : []),
+    [barOn, query, filterCtx, kinds, scopeWords, scopes, scope],
+  );
+  // Every press in the bar edits the box as it is now - read off the input, as acceptFilter does - and leaves the
+  // caret at the end, ready for the next word. `keys`: the press came from the keyboard, whose focus stays in the
+  // bar (FilterBar); from a pointer, the box takes the focus back.
+  const liveQuery = () => inputRef.current?.value ?? query;
+  const editFromBar = (text: string, keys: boolean) => replaceQuery(text, text.length, { focus: !keys });
+  const openFacet = (f: Facet, keys: boolean) => {
+    setFacet((cur) => (cur?.facet === f ? null : { facet: f, leaveOut: false }));
+    if (!keys) inputRef.current?.focus();
+  };
+  /** Presses one of the open key's choices; true when that closes the picker (a key that holds one value got it). */
+  const pickFacet = (o: FacetOffer<(typeof directory)[number]>, keys: boolean): boolean => {
+    const s = o.suggestion;
+    editFromBar(applyFacetPick(liveQuery(), { token: s.token, pressedBy: o.pressedBy }), keys);
+    if (s.kind === "in" && !s.negate && !o.pressedBy.length) kindAffinity.bump(s.collection);
+    const f = facetOf(s.token);
+    const done = !!f && !f.negate && f.facet !== "kind" && !o.pressedBy.length;
+    if (done) setFacet(null);
+    return done;
+  };
+  // Takes a "Filter by" offer: its filter goes in the place of the words that named it.
+  const takeWordFilter = (w: WordFilter<(typeof directory)[number]>, keys: boolean) => {
+    const raw = liveQuery();
+    if (raw.slice(w.start, w.end) !== w.words) return; // the box changed under it; the next render offers afresh
+    const after = raw.slice(w.end);
+    editFromBar(`${raw.slice(0, w.start)}${w.suggestion.token}${after.trim() ? after : " "}`.replace(/\s+/g, " ").trimStart(), keys);
+    if (w.suggestion.kind === "in" && !w.suggestion.named) kindAffinity.bump(w.suggestion.collection);
+  };
+  // A long list's last choice: the key itself, written at the end of the box with the caret after it, so its
+  // completions take over as the person types (`-` first while leaving out).
+  const handOff = (f: Facet) => {
+    const key = HAND_OFF[f]?.key;
+    if (!key) return;
+    const raw = liveQuery().trimEnd();
+    const word = `${facet?.leaveOut ? "-" : ""}${key}`;
+    setFacet(null);
+    replaceQuery(`${raw}${raw ? " " : ""}${word}`);
+  };
+  const toggleNewest = (keys: boolean) => {
+    const raw = liveQuery();
+    editFromBar(applyFacetPick(raw, { token: "sort:new", pressedBy: (raw.match(/\S+/g) ?? []).filter((w) => w.toLowerCase() === "sort:new") }), keys);
+  };
 
   const flat = useMemo(() => sections.flatMap((s) => s.items), [sections]);
 
@@ -1346,6 +1513,10 @@ function usePaletteSearch({ me, open, close }: { me: Me; open: boolean; close: (
       e.preventDefault();
       setActions(null);
       setActive(0);
+    } else if (facet && e.key === "Escape") {
+      // The filter bar's picker goes first; the next Esc closes the search.
+      e.preventDefault();
+      setFacet(null);
     } else if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && askOn) {
       // ⌘↵ asks whatever is typed, wherever the highlight is.
       e.preventDefault();
@@ -1403,7 +1574,7 @@ function usePaletteSearch({ me, open, close }: { me: Me; open: boolean; close: (
     enterKeyHint: "go" as const,
   };
 
-  // The filter guide, from the hint bar's "all filters".
+  // The filter guide, from the filter bar's `?`.
   const showGuide = () => {
     const raw = query.trim();
     replaceQuery(raw ? `${raw} ${GUIDE_WORD}` : GUIDE_WORD);
@@ -1419,11 +1590,11 @@ function usePaletteSearch({ me, open, close }: { me: Me; open: boolean; close: (
     // Saved searches: the chips, running one, and saving what is on screen now under a name.
     saved: savedSearches.saved,
     applySaved,
-    canSave: query.trim() !== "" || scope !== "all" || refineOn,
+    canSave: query.trim() !== "" || scope !== "all",
     suggestedName,
     // Saved unpinned: it goes into the Saved menu, which the toast points to, rather than into the chip row.
     saveCurrent: async (name: string) => {
-      await savedSearches.save({ name, query: query.trim(), scope, refine });
+      await savedSearches.save({ name, query: query.trim(), scope, refine: EMPTY_REFINE });
       toast({ title: `Saved "${name}"`, description: "It's in the Saved menu - pin it there to keep it in the chip row." });
     },
     renameSaved: savedSearches.rename,
@@ -1449,7 +1620,7 @@ function usePaletteSearch({ me, open, close }: { me: Me; open: boolean; close: (
       setOnList(false);
       setPick(i);
     },
-    chips, scope: typedKinds ? ("all" as Scope) : scope, setScope, refine, setRefine, focusBox: () => inputRef.current?.focus(),
+    chips, scope: typedKinds ? ("all" as Scope) : scope, setScope, focusBox: () => inputRef.current?.focus(),
     // The filter words in the box as pills; taking one out removes the word, and the space after it.
     typedFilters,
     // The same words styled in the box itself (QueryHighlight), while there are any; null otherwise.
@@ -1459,9 +1630,14 @@ function usePaletteSearch({ me, open, close }: { me: Me; open: boolean; close: (
       replaceQuery(`${raw.slice(0, w.start)}${raw.slice(w.end)}`.replace(/\s+/g, " ").trimStart());
     },
     removeAllTyped: () => replaceQuery(withoutTyped()),
-    // "Mine" and "My team" match nothing for a caller with no employee record (routes/search.ts), so they are
-    // not offered to one.
-    canOwn: !!me.employee_id,
+    // The filter bar: whether its keys show, the keys, the open picker and its choices, the filters the typed
+    // words name, and what each press does. `escSteps`: Esc has something to go back from (the picker, or a
+    // record's actions) before it closes the search, which the modal's own Esc handling must leave alone.
+    barOn, facetKeys, facet, facetChoices, facetLoading, wordFilters, newestOn,
+    openFacet, pickFacet, takeWordFilter, handOff, toggleNewest,
+    closeFacet: () => setFacet(null),
+    setLeaveOut: (leaveOut: boolean) => setFacet((f) => (f ? { ...f, leaveOut } : f)),
+    escSteps: !!facet || !!actions,
   };
 }
 
@@ -1479,11 +1655,13 @@ function PaletteResults({ p, className }: { p: PaletteSearch; className?: string
       <div ref={p.listRef} id={p.listId} role="listbox" aria-label="Search results" className={cn("min-h-0 overflow-y-auto overscroll-contain p-2", className)}>
         {p.flat.length === 0 ? (
           <p className="px-3 py-8 text-center text-sm text-muted-foreground">
-            {p.query.trim().length < 2
-              ? "Keep typing to search your data…"
-              : !p.settled
-                ? "Searching…"
-                : `No matches for "${p.query}".`}
+            {isGuideQuery(p.query)
+              ? `No filter matches "${p.query.trimStart().slice(1).trim()}".`
+              : p.query.trim().length < 2
+                ? "Keep typing to search your data…"
+                : !p.settled
+                  ? "Searching…"
+                  : `No matches for "${p.query}".`}
           </p>
         ) : (
           p.sections.map((section, si) => (
@@ -1652,22 +1830,6 @@ function PalettePreview({ p }: { p: PaletteSearch }) {
   );
 }
 
-// A radio group in the Filters menu. Radix reads an empty value as "nothing chosen", so the "any" choice
-// (Anyone, Any time, Best match) travels as ANY and is stored as "".
-const ANY = "any";
-function RefineGroup<K extends string>({ label, labels, value, onChange }: { label: string; labels: Record<K, string>; value: K; onChange: (v: K) => void }) {
-  return (
-    <>
-      <DropdownMenuLabel className="text-xs text-muted-foreground">{label}</DropdownMenuLabel>
-      <DropdownMenuRadioGroup value={value || ANY} onValueChange={(v) => onChange((v === ANY ? "" : v) as K)}>
-        {(Object.keys(labels) as K[]).map((k) => (
-          <DropdownMenuRadioItem key={k || ANY} value={k || ANY}>{labels[k]}</DropdownMenuRadioItem>
-        ))}
-      </DropdownMenuRadioGroup>
-    </>
-  );
-}
-
 // A stretch of the box's text for QueryHighlight: plain words, or one filter word split into its key (`in:`,
 // `@`, `-@`) and its value, with why it names nothing when it does not.
 type HighlightRun = { text: string; filter?: { key: string; value: string; problem: string | null } };
@@ -1725,61 +1887,6 @@ function QueryHighlight({ runs, input, lineClass }: { runs: HighlightRun[]; inpu
         )}
       </div>
     </div>
-  );
-}
-
-// The Filters menu at the end of the chip row; `on` is how many of its filters are on, `onSave` starts naming
-// the search on screen to save it.
-function FiltersMenu({ p, on, onSave }: { p: PaletteSearch; on: number; onSave: () => void }) {
-  // Saving hands the focus to the name field, so the close that follows must not take it back to the box.
-  const naming = useRef(false);
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <button type="button" className={cn(filterChipClass(on > 0), "inline-flex shrink-0 items-center gap-1")}>
-          <ListFilter className="h-3 w-3" />
-          Filters{on > 0 && <span className="tabular-nums"> {on}</span>}
-          <ChevronDown className="h-3 w-3" />
-        </button>
-      </DropdownMenuTrigger>
-      {/* Back to the box when the menu closes, not to the trigger: the box is where typing goes on. */}
-      <DropdownMenuContent
-        align="end"
-        className="w-52"
-        onCloseAutoFocus={(e) => {
-          e.preventDefault();
-          if (naming.current) naming.current = false;
-          else p.focusBox();
-        }}
-      >
-        {p.canOwn && (
-          <>
-            <RefineGroup label="Whose" labels={OWNER_LABEL} value={p.refine.owner} onChange={(owner) => p.setRefine({ owner })} />
-            <DropdownMenuSeparator />
-          </>
-        )}
-        <RefineGroup label="Created" labels={SINCE_LABEL} value={p.refine.since} onChange={(since) => p.setRefine({ since })} />
-        <DropdownMenuSeparator />
-        <RefineGroup label="Order" labels={SORT_LABEL} value={p.refine.sort} onChange={(sort) => p.setRefine({ sort })} />
-        <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={p.showGuide}>
-          <ListFilter className="h-4 w-4" />
-          Every filter word…
-        </DropdownMenuItem>
-        {/* Hidden rather than disabled when there is nothing to save yet: the empty box. */}
-        {p.canSave && (
-          <DropdownMenuItem
-            onSelect={() => {
-              naming.current = true;
-              onSave();
-            }}
-          >
-            <Bookmark className="h-4 w-4" />
-            Save this search…
-          </DropdownMenuItem>
-        )}
-      </DropdownMenuContent>
-    </DropdownMenu>
   );
 }
 
@@ -1970,10 +2077,10 @@ function useScrollEdges<T extends HTMLElement>(watch: unknown) {
 //    with how many results it has for the words typed and greyed when that is none;
 //  - or, while a filter word is being typed, what can come after it - the kinds after `in:`, the statuses
 //    after `status:`, the people after `@` - for a click, or Tab / Enter / → from the box (usePaletteSearch);
-//  - Filters, a menu of the narrowings worth a click - whose, how recent, in what order - each one a filter
-//    word the search already reads, with the full list of words one item further.
-// Under that, while any are on, every filter in force as a pill that says what it means and takes it off:
-// the ones typed in the box (which edits the box) and the ones from the menu, with Clear all for the lot.
+//  - the saved searches menu, and a button to save the search on screen under a name.
+// Under that, while any are on, every filter word in the box as a pill that says what it means and takes it out
+// of the box, with Clear all for the lot. The filters themselves are offered to press in the filter bar under the
+// results (FilterBar).
 function PaletteChips({ p }: { p: PaletteSearch }) {
   // Only the saved searches pinned to the row; every one is in the Saved menu.
   const pinned = p.saved.filter((s) => s.pinned);
@@ -1990,15 +2097,7 @@ function PaletteChips({ p }: { p: PaletteSearch }) {
     if (p.choosing) document.getElementById(`${p.listId}-suggest-${p.pick}`)?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [p.choosing, p.pick, p.listId]);
   if (!p.chips) return null;
-  const menuOn = [
-    p.refine.owner && { key: "owner", label: OWNER_LABEL[p.refine.owner], remove: () => p.setRefine({ owner: "" }) },
-    p.refine.since && { key: "since", label: SINCE_LABEL[p.refine.since], remove: () => p.setRefine({ since: "" }) },
-    p.refine.sort && { key: "sort", label: SORT_LABEL[p.refine.sort], remove: () => p.setRefine({ sort: "" }) },
-  ].filter((f): f is { key: string; label: string; remove: () => void } => !!f);
-  const on: { key: string; label: string; remove: () => void; problem?: string | null }[] = [
-    ...p.typedFilters.map((w) => ({ key: `typed:${w.start}`, label: w.label, problem: w.problem, remove: () => p.removeTyped(w) })),
-    ...menuOn,
-  ];
+  const on = p.typedFilters.map((w) => ({ key: `typed:${w.start}`, label: w.label, problem: w.problem, remove: () => p.removeTyped(w) }));
   return (
     <div className="shrink-0 border-b">
       <div className="flex items-center gap-2 px-3 py-2">
@@ -2055,7 +2154,18 @@ function PaletteChips({ p }: { p: PaletteSearch }) {
           </div>
         )}
         {!naming && <SavedMenu p={p} onRename={(s) => setNaming({ id: s.id, name: s.name })} />}
-        {!naming && <FiltersMenu p={p} on={menuOn.length} onSave={() => setNaming({ name: p.suggestedName })} />}
+        {/* Hidden rather than disabled while there is nothing to save yet: the empty box. */}
+        {!naming && p.canSave && (
+          <button
+            type="button"
+            aria-label="Save this search"
+            title="Save this search"
+            onClick={() => setNaming({ name: p.suggestedName })}
+            className={cn(filterChipClass(false), "inline-flex shrink-0 items-center px-2")}
+          >
+            <BookmarkPlus className="h-3.5 w-3.5" />
+          </button>
+        )}
       </div>
       {on.length > 0 && (
         <div className="flex flex-wrap items-center gap-1.5 px-3 pb-2">
@@ -2088,7 +2198,6 @@ function PaletteChips({ p }: { p: PaletteSearch }) {
             <button
               type="button"
               onClick={() => {
-                p.setRefine(NO_REFINE);
                 p.removeAllTyped();
                 p.focusBox();
               }}
@@ -2103,27 +2212,224 @@ function PaletteChips({ p }: { p: PaletteSearch }) {
   );
 }
 
-// Hints for what this box does beyond a plain search list, for devices with a keyboard. The conventions every
-// list shares (arrows, Enter, Esc) go unsaid, and the Tab hint shows only while Tab does something on the
-// highlighted row. Below md the filter syntax is hidden, so with none of the others to say the row goes too
-// rather than leave an empty bar. There is room for a few filters, not all of them: the examples give way
-// first, and "all filters" opens the guide `?` does (lib/paletteQuery.ts FILTER_GUIDE), so the rest are one
-// click or one keystroke away.
-function PaletteHints({ p }: { p: PaletteSearch }) {
-  return (
-    <div className={cn("hidden shrink-0 items-center gap-4 border-t px-4 py-2 text-[13px] text-muted-foreground", p.canComplete || p.canOpenActions || p.askOn || p.canRecall ? "sm:flex" : "md:flex")}>
+// The filter bar under the results: every filter as something to press, for whoever does not type filter words -
+// and on a phone, where it sits just above the keyboard, for everyone. A press writes a real filter word into the
+// box, so the box stays the one record of what is searched, and shows the word that would have done it:
+//  - "Filter by": the filters the typed words name - `pending` is Status: Pending, `priya` is Priya Shah - each
+//    taking its words' place (lib/paletteQuery.ts filtersForWords). Above the keys, so the keys never move as
+//    these come and go.
+//  - the keys - Kind, Who, Department, Status, When - each with how many of its filters are on, then Newest
+//    first, a toggle, and `?` for the guide that spells out every filter word. A key that cannot narrow this
+//    search is not shown (hide, never disable).
+//  - a key's picker, in the keys' place: its choices, the ones already in the box pressed (pressing one again
+//    takes it out), Keep / Leave out where the key has a `-` form, and for the long lists a last choice that
+//    hands over to typing the key, whose completions narrow as letters are typed. Esc puts it away.
+// The keyboard hints ride at the end of the row, on a device with a keyboard: the conventions every list shares
+// (arrows, Enter, Esc) go unsaid, and the Tab hint shows only while Tab does something on the highlighted row.
+// A press from a pointer leaves the focus in the box (the field's drop-down keeps it there anyway); one from the
+// keyboard - a click no pointer made, `detail` 0 - keeps it in the bar, on the next thing to press.
+function FilterBar({ p }: { p: PaletteSearch }) {
+  const bar = useRef<HTMLDivElement>(null);
+  const open = p.facet;
+  const offersRow = useScrollEdges<HTMLDivElement>(`${!!open}:${p.wordFilters.length}`);
+  const keysRow = useScrollEdges<HTMLDivElement>(`${!!open}:${p.facetKeys.length}:${p.newestOn}`);
+  const choicesRow = useScrollEdges<HTMLDivElement>(`${open?.facet}:${open?.leaveOut}:${p.facetChoices?.length}:${p.facetLoading}`);
+  // Where the keyboard's focus goes once a press has re-rendered the bar: the first of these selectors that finds
+  // something, since what they point at is only drawn by that render.
+  const refocus = useRef<string[] | null>(null);
+  useLayoutEffect(() => {
+    const wanted = refocus.current;
+    if (!wanted) return;
+    refocus.current = null;
+    for (const selector of wanted) {
+      const el = bar.current?.querySelector<HTMLElement>(selector);
+      if (el) return el.focus();
+    }
+  });
+  const keyed = (e: React.MouseEvent) => e.detail === 0;
+  const keyOf = (f: Facet) => `[data-facet-key="${f}"]`;
+  const hints = (
+    <>
       {p.canComplete && <span className="shrink-0">⇥ complete · → next</span>}
       {p.canRecall && <span className="shrink-0">↑ last search</span>}
       {p.canOpenActions && <span className="shrink-0">⇥ actions</span>}
       {p.askOn && <span className="shrink-0">⌘↵ ask</span>}
-      <span className="hidden min-w-0 truncate md:inline">in:tickets · @name · is:mine · dept:sales · after:7d</span>
-      <button
-        type="button"
-        className="ml-auto hidden shrink-0 rounded-sm hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring md:inline"
-        onClick={p.showGuide}
-      >
-        ? all filters
-      </button>
+    </>
+  );
+  const hasHints = p.canComplete || p.canRecall || p.canOpenActions || p.askOn;
+  // Nothing to narrow here - Pages, the `?` guide, a record's actions - so the hints alone, where there are any.
+  if (!p.barOn) {
+    return hasHints ? <div className="hidden shrink-0 items-center gap-4 border-t px-4 py-2 text-xs text-muted-foreground sm:flex">{hints}</div> : null;
+  }
+  const handOff = open ? HAND_OFF[open.facet] : undefined;
+  return (
+    <div
+      ref={bar}
+      className="shrink-0 border-t"
+      onKeyDown={(e) => {
+        if (e.key !== "Escape" || !open) return;
+        // The picker goes first, wherever in the bar the focus is; the box's own Esc would close the search.
+        e.preventDefault();
+        e.stopPropagation();
+        refocus.current = [keyOf(open.facet)];
+        p.closeFacet();
+      }}
+    >
+      {!open && p.wordFilters.length > 0 && (
+        <div className="flex items-center gap-2 px-3 pt-2">
+          <span className="flex shrink-0 items-center gap-1 text-xs font-medium text-muted-foreground">
+            <WandSparkles aria-hidden className="h-3 w-3" />
+            Filter by
+          </span>
+          <div ref={offersRow.ref} style={offersRow.edgeFade} className="no-scrollbar min-w-0 flex-1 overflow-x-auto">
+            <div role="group" aria-label="Filter by" className="flex w-max items-center gap-1.5">
+              {p.wordFilters.map((w) => (
+                // Dashed: an offer, not a filter in force. Its title says which words it takes the place of.
+                <button
+                  key={`${w.start}:${w.suggestion.token}`}
+                  type="button"
+                  data-word-filter
+                  title={`"${w.words}" as ${w.suggestion.token}`}
+                  onClick={(e) => {
+                    if (keyed(e)) refocus.current = ["[data-word-filter]", "[data-facet-key]"];
+                    p.takeWordFilter(w, keyed(e));
+                  }}
+                  className={cn(filterChipClass(false), "inline-flex shrink-0 items-center whitespace-nowrap border-dashed")}
+                >
+                  {wordFilterLabel(w.suggestion)}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+      <div className="flex items-center gap-2 px-3 py-2">
+        {open ? (
+          <>
+            <button
+              type="button"
+              data-facet-back
+              aria-label="Back to filters"
+              title="Back to filters (Esc)"
+              onClick={(e) => {
+                if (keyed(e)) refocus.current = [keyOf(open.facet)];
+                else p.focusBox();
+                p.closeFacet();
+              }}
+              className="-ml-1 flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+            >
+              <ArrowLeft className="h-3.5 w-3.5" />
+            </button>
+            <span className="shrink-0 text-xs font-medium">{FACET_LABEL[open.facet]}</span>
+            {/* Leave out: the key's - form. The dates have none - before: is already the other side of after:. */}
+            {open.facet !== "when" && (
+              <div role="group" aria-label="Keep or leave out" className="flex shrink-0 items-center gap-1">
+                {([false, true] as const).map((leaveOut) => (
+                  <button
+                    key={String(leaveOut)}
+                    type="button"
+                    aria-pressed={open.leaveOut === leaveOut}
+                    onClick={(e) => {
+                      if (!keyed(e)) p.focusBox();
+                      p.setLeaveOut(leaveOut);
+                    }}
+                    className={cn(filterChipClass(open.leaveOut === leaveOut), "shrink-0 whitespace-nowrap")}
+                  >
+                    {leaveOut ? "Leave out" : "Keep"}
+                  </button>
+                ))}
+              </div>
+            )}
+          </>
+        ) : (
+          <div ref={keysRow.ref} style={keysRow.edgeFade} className="no-scrollbar min-w-0 flex-1 overflow-x-auto">
+            <div role="group" aria-label="Narrow the results" className="flex w-max items-center gap-1.5">
+              {p.facetKeys.map((k) => (
+                <button
+                  key={k.facet}
+                  type="button"
+                  data-facet-key={k.facet}
+                  onClick={(e) => {
+                    if (keyed(e)) refocus.current = ["[data-facet-choice]", "[data-facet-back]"];
+                    p.openFacet(k.facet, keyed(e));
+                  }}
+                  className={cn(filterChipClass(k.count > 0), "inline-flex shrink-0 items-center gap-1 whitespace-nowrap")}
+                >
+                  {k.label}
+                  {/* As FilterChip draws a count: a SPACE before it, so the name reads "Status 1", not "Status1". */}
+                  {k.count > 0 && <>{" "}<span className="tabular-nums opacity-70">{k.count}</span></>}
+                  <ChevronDown aria-hidden className="h-3 w-3" />
+                </button>
+              ))}
+              <button
+                type="button"
+                aria-pressed={p.newestOn}
+                onClick={(e) => p.toggleNewest(keyed(e))}
+                className={cn(filterChipClass(p.newestOn), "shrink-0 whitespace-nowrap")}
+              >
+                Newest first
+              </button>
+              <button
+                type="button"
+                aria-label="Every filter word"
+                title="Every filter word, with an example of each"
+                onClick={p.showGuide}
+                className={cn(filterChipClass(false), "shrink-0 px-2.5")}
+              >
+                ?
+              </button>
+            </div>
+          </div>
+        )}
+        {hasHints && <div className="ml-auto hidden shrink-0 items-center gap-3 pl-1 text-xs text-muted-foreground sm:flex">{hints}</div>}
+      </div>
+      {open && (
+        <div className="px-3 pb-2">
+          {p.facetLoading ? (
+            <ChipsSkeleton />
+          ) : (
+            // One row that scrolls sideways on a phone, as every chip row does there; wrapped from sm, so a long
+            // list (every kind) can be read at a glance rather than scrolled through.
+            <div ref={choicesRow.ref} style={choicesRow.edgeFade} className="no-scrollbar overflow-x-auto sm:max-h-36 sm:overflow-x-hidden sm:overflow-y-auto">
+              <div role="group" aria-label={`${FACET_LABEL[open.facet]} choices`} className="flex w-max items-center gap-1.5 sm:w-auto sm:flex-wrap">
+                {(p.facetChoices ?? []).map((c) => {
+                  const on = c.offer.pressedBy.length > 0;
+                  const token = c.offer.suggestion.token;
+                  return (
+                    // Its title is the word it writes, for whoever would rather type it next time.
+                    <button
+                      key={token}
+                      type="button"
+                      data-facet-choice={token}
+                      aria-pressed={on}
+                      title={token}
+                      onClick={(e) => {
+                        const keys = keyed(e);
+                        const closed = p.pickFacet(c.offer, keys);
+                        if (keys) refocus.current = closed ? [keyOf(open.facet)] : [`[data-facet-choice="${CSS.escape(token)}"]`];
+                      }}
+                      className={cn(filterChipClass(on), "inline-flex shrink-0 items-center gap-1 whitespace-nowrap", c.muted && !on && "opacity-60")}
+                    >
+                      {choiceLabel(c.offer.suggestion)}
+                      {c.count !== undefined && <>{" "}<span className="tabular-nums opacity-70">{c.count}</span></>}
+                    </button>
+                  );
+                })}
+                {handOff && (
+                  <button
+                    type="button"
+                    onClick={() => p.handOff(open.facet)}
+                    className={cn(filterChipClass(false), "shrink-0 whitespace-nowrap border-dashed")}
+                  >
+                    {handOff.label}
+                  </button>
+                )}
+                {!p.facetChoices?.length && !handOff && <span className="text-xs text-muted-foreground">Nothing to choose from here</span>}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -2176,6 +2482,11 @@ export function CommandPalette({
         <DialogPrimitive.Content
           data-search-panel
           aria-describedby={undefined}
+          // The dialog hears Esc first (a document listener, in the capture phase); while Esc has a step to go back
+          // from - the filter bar's picker, a record's actions - it is left to the box and the bar to take it.
+          onEscapeKeyDown={(e) => {
+            if (p.escSteps) e.preventDefault();
+          }}
           style={keyboard ? ({ "--kb": `${keyboard}px` } as React.CSSProperties) : undefined}
           className={cn(
             // Phone: docked to the top edge, full width, giving up height to the on-screen keyboard - which
@@ -2218,7 +2529,7 @@ export function CommandPalette({
           </div>
           <PaletteChips p={p} />
           <PaletteResults p={p} className="flex-1 sm:max-h-[55vh] sm:flex-none" />
-          <PaletteHints p={p} />
+          <FilterBar p={p} />
         </DialogPrimitive.Content>
       </DialogPrimitive.Portal>
     </DialogPrimitive.Root>
@@ -2409,7 +2720,7 @@ export function InlineSearch({ me, isMac, className, onOpenChange, openWidth, op
               <PaletteResults p={p} className="min-w-0 flex-1" />
               {p.previewable && <PalettePreview p={p} />}
             </div>
-            <PaletteHints p={p} />
+            <FilterBar p={p} />
           </div>
         )}
       </div>

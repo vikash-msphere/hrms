@@ -56,6 +56,8 @@ export default tseslint.config(
       "test-results*/**",
       "playwright-report/**",
       "blob-report/**",
+      // Git-ignored scratch space (e2e worker logs, one-off trace readers); never shipped.
+      "tmp/**",
       "src/http/openapi.d.ts",
       "src/db/migrations/**",
       "misc/**",

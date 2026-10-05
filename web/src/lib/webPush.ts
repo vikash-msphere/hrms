@@ -2,7 +2,7 @@
 // deployment; the SPA half is gated on VITE_VAPID_PUBLIC_KEY being baked into the build. Subscriptions are
 // stored server-side in the caller's own preferences row (key "push_subscriptions"), so the worker can reach
 // this user's browsers when a notification lands while no tab is open.
-import { refetchPref, writePref } from "@/lib/prefs";
+import { updatePref } from "@/lib/prefs";
 
 const VAPID_PUBLIC = import.meta.env.VITE_VAPID_PUBLIC_KEY as string | undefined;
 const PREF_KEY = "push_subscriptions";
@@ -44,14 +44,11 @@ function urlBase64ToUint8Array(base64: string): Uint8Array {
   return Uint8Array.from(raw, (c) => c.charCodeAt(0));
 }
 
-// RE-READ, not the snapshot. `readPref` answers from a map memoized for the whole page life, and this row is a
-// LIST several devices append to - so a tab open since before another device enrolled held a list without it,
-// and `writePref` below PATCHes the whole array back with no If-Match and no merge. Enabling or disabling push
-// here then deregistered the other device, which stopped receiving pushes with nothing anywhere saying so.
-async function readServerSubs(): Promise<StoredSub[]> {
-  const v = await refetchPref<{ subs?: StoredSub[] }>(PREF_KEY);
-  return Array.isArray(v?.subs) ? v.subs : []; // absent: nothing registered yet
-}
+// The row is a LIST several devices append to, so it is changed through `updatePref`: a fresh read rather than
+// the page-life snapshot, and a write guarded on that read's version. A stale or failed read written back here
+// deregistered every other device, which then stopped receiving pushes with nothing anywhere saying so.
+type SubsPref = { subs?: StoredSub[] };
+const subsOf = (v: SubsPref | undefined): StoredSub[] => (Array.isArray(v?.subs) ? v.subs : []); // absent: nothing registered yet
 
 /** Ask permission, subscribe this browser, and register the subscription server-side. Throws with a
  *  user-showable message when permission is refused. */
@@ -67,9 +64,8 @@ export async function enablePush(): Promise<void> {
       applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC!) as BufferSource,
     }));
   const json = sub.toJSON() as StoredSub;
-  const others = (await readServerSubs()).filter((s) => s.endpoint !== json.endpoint);
   // Newest device last; cap total so one user can't accumulate unbounded dead endpoints.
-  await writePref(PREF_KEY, { subs: [...others, json].slice(-MAX_DEVICES) });
+  await updatePref<SubsPref>(PREF_KEY, (v) => ({ subs: [...subsOf(v).filter((s) => s.endpoint !== json.endpoint), json].slice(-MAX_DEVICES) }));
 }
 
 /** Unsubscribe this browser and drop it from the server-side registry. */
@@ -78,8 +74,5 @@ export async function disablePush(): Promise<void> {
   const sub = reg && (await reg.pushManager.getSubscription());
   const endpoint = sub?.endpoint;
   if (sub) await sub.unsubscribe();
-  if (endpoint) {
-    const others = (await readServerSubs()).filter((s) => s.endpoint !== endpoint);
-    await writePref(PREF_KEY, { subs: others });
-  }
+  if (endpoint) await updatePref<SubsPref>(PREF_KEY, (v) => ({ subs: subsOf(v).filter((s) => s.endpoint !== endpoint) }));
 }

@@ -10,6 +10,7 @@ import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
 import { getPreference, listPreferences, upsertPreference, MAX_PREFERENCE_BYTES, MAX_PREFERENCE_KEYS } from "../src/services/preferences";
 import { PUSH_PREF_KEY, MAX_PUSH_DEVICES } from "../src/services/webPush";
+import { etagOf } from "../src/http/serialize";
 
 // A preference is one row per (person, key), and the person is not one session: a second tab, a phone, a
 // window restored on sign-in. Writing "theme" from two of them at the same instant is the ordinary case, not
@@ -130,5 +131,46 @@ describe("what a preference may contain", () => {
     ).rejects.toThrow(/at most/i);
     // Every other key stays free-form: that is the contract, and only this one is acted on server-side.
     await expect(upsertPreference(deps, actor, "anything", { deeply: { nested: [1, 2, 3] } })).resolves.toBeTruthy();
+  });
+});
+
+describe("a preference value built on a read", () => {
+  // The guards a list several devices append to needs (push subscriptions, saved searches): a value built on
+  // a read only lands while the row is still at that read, and a caller that read nothing may only create.
+  const sub = (n: number) => ({ endpoint: `https://push.example.com/${n}`, keys: { p256dh: "p", auth: "a" } });
+
+  it("is refused once another device has changed it since the read (If-Match)", async () => {
+    const actor = await seedActor();
+    const read = await upsertPreference(deps, actor, "saved_searches", { searches: ["a"] });
+    const etag = etagOf(+new Date(read.updatedAt));
+    await new Promise((r) => setTimeout(r, 5)); // a distinct millisecond, so the versions differ
+    await upsertPreference(deps, actor, "saved_searches", { searches: ["a", "b"] }); // the other device
+    await expect(upsertPreference(deps, actor, "saved_searches", { searches: ["a", "c"] }, etag)).rejects.toThrow(/etag mismatch/);
+    expect(JSON.parse((await getPreference(deps, actor, "saved_searches")).value)).toEqual({ searches: ["a", "b"] });
+  });
+
+  it("lands while the row is still at the version read", async () => {
+    const actor = await seedActor();
+    const read = await upsertPreference(deps, actor, PUSH_PREF_KEY, { subs: [sub(1)] });
+    await upsertPreference(deps, actor, PUSH_PREF_KEY, { subs: [sub(1), sub(2)] }, etagOf(+new Date(read.updatedAt)));
+    expect(JSON.parse((await getPreference(deps, actor, PUSH_PREF_KEY)).value).subs).toHaveLength(2);
+  });
+
+  it("never replaces an existing row for a caller that read none (If-None-Match: *)", async () => {
+    const actor = await seedActor();
+    await upsertPreference(deps, actor, PUSH_PREF_KEY, { subs: [sub(1), sub(2)] });
+    await expect(upsertPreference(deps, actor, PUSH_PREF_KEY, { subs: [sub(3)] }, undefined, "*")).rejects.toThrow(/created elsewhere/);
+    expect(JSON.parse((await getPreference(deps, actor, PUSH_PREF_KEY)).value).subs).toHaveLength(2);
+  });
+
+  it("creates the row for a caller that read none when there is none", async () => {
+    const actor = await seedActor();
+    await upsertPreference(deps, actor, "nav", { folds: ["a"] }, undefined, "*");
+    expect(JSON.parse((await getPreference(deps, actor, "nav")).value)).toEqual({ folds: ["a"] });
+  });
+
+  it("refuses an If-Match for a row that does not exist", async () => {
+    const actor = await seedActor();
+    await expect(upsertPreference(deps, actor, "nav", { folds: [] }, 'W/"1"')).rejects.toThrow(/etag mismatch/);
   });
 });

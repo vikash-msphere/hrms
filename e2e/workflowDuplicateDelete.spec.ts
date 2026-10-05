@@ -57,7 +57,13 @@ test("a rule is duplicated into a real second rule, and both are deleted", async
     const confirmOrig = page.getByRole("dialog").filter({ hasText: "Delete this rule?" });
     await expect(confirmOrig).toBeVisible({ timeout: 30_000 });
     await confirmOrig.getByRole("button", { name: "Delete", exact: true }).click();
+    // Not on the card count alone: `cardOf` needs the card's SWITCH by role, and while the confirm is still
+    // closing the modal aria-hides the page, so the count reads 0 at once - before the DELETE has landed, and
+    // the cleanup below then purged the rule under it (the UI's DELETE answered 404). The "Rule deleted" toast
+    // is no wait either: the copy's delete already raised that text.
+    await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 30_000 });
     await expect(cardOf(ruleName)).toHaveCount(0, { timeout: 30_000 });
+    await expect.poll(async () => (await namedRules(page, ruleName)).length, { timeout: 30_000 }).toBe(0);
   } finally {
     // By NAME, not by the path this test has just deleted through the UI: `automations` is a hard delete
     // (src/routes/automations.ts - "a rule that no longer exists must not sit in the trash still firing"),
@@ -67,9 +73,13 @@ test("a rule is duplicated into a real second rule, and both are deleted", async
   }
 });
 
-async function purgeNamed(page: import("@playwright/test").Page, name: string) {
-  const res = await page.request.get("/v1/automations?page_size=100");
-  if (!res.ok()) return;
+async function namedRules(page: import("@playwright/test").Page, name: string): Promise<{ path: string }[]> {
+  const res = await page.request.get("/v1/automations?max_page_size=100");
+  if (!res.ok()) return [];
   const { results = [] } = (await res.json()) as { results?: { path: string; name?: string }[] };
-  for (const r of results.filter((x) => x.name === name)) await purge(page, r.path);
+  return results.filter((x) => x.name === name);
+}
+
+async function purgeNamed(page: import("@playwright/test").Page, name: string) {
+  for (const r of await namedRules(page, name)) await purge(page, r.path);
 }

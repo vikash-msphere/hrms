@@ -132,6 +132,18 @@ export function LinesSkeleton({ rows = 2, className }: { rows?: number; classNam
   );
 }
 
+/** A row of pill chips, in the widths short names come in: a filter's choices while they load (the search's
+ *  filter bar). */
+export function ChipsSkeleton({ count = 5, className }: { count?: number; className?: string }) {
+  return (
+    <Busy className={cn("flex items-center gap-1.5", className)}>
+      {Array.from({ length: count }, (_, i) => (
+        <div key={i} className={cn(BAR, "h-6 shrink-0 rounded-full")} style={{ width: `${[64, 88, 56, 76, 96][i % 5]}px` }} />
+      ))}
+    </Busy>
+  );
+}
+
 /** A grid of equal tiles (an emoji or illustration picker). Same column counts as the grid it stands in. */
 export function TilesSkeleton({ count = 12, className, tile = "aspect-square" }: { count?: number; className?: string; tile?: string }) {
   return (

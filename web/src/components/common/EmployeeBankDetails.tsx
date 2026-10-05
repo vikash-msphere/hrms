@@ -7,6 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Field, FieldRow } from "@/components/common/Field";
+import { DetailSkeleton } from "@/components/common/Skeletons";
 import { FormError } from "@/components/common/FormError";
 import { useDialogGuard } from "@/components/common/dialogGuard";
 import { AccessScope } from "@/components/access/AccessScope";
@@ -41,11 +42,18 @@ export function EmployeeBankDetails({ employeeId, canEdit, title = "Bank details
   // real dependency IS the loader, and listing its inputs by hand is a claim the linter cannot check and the
   // next person cannot maintain - the class of bug where a fetch keeps reading the employee it was first
   // mounted with. The identity changes exactly when `employeeId` does, so this fires when it always fired.
+  //
+  // A read that fails is NOT "no bank details on file": until one lands the card offers no Add/Edit, because a
+  // record entered over what looks like an empty one, with no version to guard it, replaces the account salary
+  // is paid into.
+  const [loadFailed, setLoadFailed] = useState(false);
   const load = useCallback(async () => {
+    setLoadFailed(false);
     try {
       setData(await get<BankDetails>(`employees/${employeeId}/bank-account`));
     } catch (e) {
       if ((e as { status?: number }).status === 403) setDenied(true);
+      else setLoadFailed(true);
     }
   }, [employeeId]);
   useEffect(() => {
@@ -123,10 +131,19 @@ export function EmployeeBankDetails({ employeeId, canEdit, title = "Bank details
             <span className="flex items-center gap-2"><Landmark className="h-4 w-4 text-primary" /> {title}</span>
           </AccessAction>
         </CardTitle>
-        {canEdit && <IconEdit label={data?.on_file ? "Edit" : "Add"} onClick={openEdit} />}
+        {canEdit && data && <IconEdit label={data.on_file ? "Edit" : "Add"} onClick={openEdit} />}
       </CardHeader>
       <CardContent>
-        {!data?.on_file ? (
+        {!data ? (
+          loadFailed ? (
+            <div className="flex items-center justify-center gap-3 py-4">
+              <p className="text-sm text-muted-foreground">Couldn't load the bank details just now.</p>
+              <Button size="sm" variant="outline" onClick={load}>Try again</Button>
+            </div>
+          ) : (
+            <DetailSkeleton rows={3} />
+          )
+        ) : !data.on_file ? (
           <p className="py-4 text-center text-sm text-muted-foreground">No bank details on file.</p>
         ) : (
           <dl className="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2">

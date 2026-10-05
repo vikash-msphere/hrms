@@ -152,29 +152,106 @@ test.describe("global search", () => {
     await expect(seeAll).toBeVisible();
   });
 
-  test("the Filters menu narrows by whose and when, shows each as a pill, and a pill's x takes it off", async ({ as }) => {
+  test("the filter bar writes whose and when into the box, each shows as a pill, and a pill's x takes it out", async ({ as }) => {
     const page = await as("super");
     await gotoRoute(page, "dashboard");
     await page.keyboard.press("ControlOrMeta+k");
     const panel = searchPanel(page);
-    await searchBox(page).fill("leave");
+    const search = searchBox(page);
+    await search.fill("leave");
 
-    // Mine, from the menu: the request carries it, and the pill says it is on.
+    // Who → Me: the word goes in the box, the request carries it, and the pill says it is on.
     const mine = page.waitForRequest((r) => r.url().includes("/search?") && r.url().includes("mine=1"));
-    await panel.getByRole("button", { name: /^Filters/ }).click();
-    await page.getByRole("menuitemradio", { name: "Mine" }).click();
+    await panel.getByRole("button", { name: "Who", exact: true }).click();
+    await panel.getByRole("group", { name: "Who choices" }).getByRole("button", { name: "Me", exact: true }).click();
     await mine;
+    await expect(search).toHaveValue("leave is:mine ");
+    // Typing goes on in the box: the bar hands the focus back to it.
+    await expect(search).toBeFocused();
     const pill = panel.getByRole("button", { name: "Remove filter: Mine" });
     await expect(pill).toBeVisible();
-    await expect(panel.getByRole("button", { name: /^Filters 1/ })).toBeVisible();
-    // Typing goes on in the box: the menu hands the focus back to it.
-    await expect(searchBox(page)).toBeFocused();
-    await expect(searchBox(page)).toHaveValue("leave");
+    // The key says how many of its filters are on, and Me closed the picker: a key holds one owner.
+    await expect(panel.getByRole("button", { name: "Who 1", exact: true })).toBeVisible();
 
-    // The pill's x takes it off again.
+    // The pill's x takes the word out again.
     await pill.click();
     await expect(pill).toHaveCount(0);
-    await expect(panel.getByRole("button", { name: /^Filters$/ })).toBeVisible();
+    await expect(search).toHaveValue("leave ");
+
+    // When → Last 7 days writes the relative window, which the request reads as a day.
+    const recent = page.waitForRequest((r) => r.url().includes("/search?") && r.url().includes("after="));
+    await panel.getByRole("button", { name: "When", exact: true }).click();
+    await panel.getByRole("group", { name: "When choices" }).getByRole("button", { name: /^Last 7 days/ }).click();
+    await recent;
+    await expect(search).toHaveValue("leave after:7d ");
+  });
+
+  test("a word that names a filter is offered as that filter, which takes the word's place", async ({ as }) => {
+    const employee = await as("employee");
+    await gotoRoute(employee, "dashboard");
+    await employee.keyboard.press("ControlOrMeta+k");
+    const panel = searchPanel(employee);
+    const search = searchBox(employee);
+    await search.fill("pending leave");
+
+    // `pending` is a status leave requests have: the bar offers it as the filter, read from the vocabulary.
+    const status = panel.getByRole("group", { name: "Filter by" }).getByRole("button", { name: "Status: Pending" });
+    await expect(status).toBeVisible({ timeout: 30_000 });
+    const filtered = employee.waitForRequest((r) => r.url().includes("/search?") && r.url().includes("status=pending"));
+    await status.click();
+    await filtered;
+    // In the word's place, with the rest of the box as it was typed.
+    await expect(search).toHaveValue("status:pending leave");
+    await expect(status).toHaveCount(0);
+  });
+
+  test("the Kind picker presses kinds in and out, Leave out writes the - form, and Esc puts it away first", async ({ as }) => {
+    const employee = await as("employee");
+    await gotoRoute(employee, "dashboard");
+    await employee.keyboard.press("ControlOrMeta+k");
+    const panel = searchPanel(employee);
+    const search = searchBox(employee);
+    await search.fill("laptop");
+
+    await panel.getByRole("button", { name: "Kind", exact: true }).click();
+    const kinds = panel.getByRole("group", { name: "Kind choices" });
+    const tickets = kinds.getByRole("button", { name: /^Tickets\b/ });
+    await tickets.click();
+    await expect(search).toHaveValue("laptop in:tickets ");
+    // in: adds up, so the picker stays open, with Tickets pressed.
+    await expect(tickets).toHaveAttribute("aria-pressed", "true");
+
+    await panel.getByRole("button", { name: "Leave out", exact: true }).click();
+    await kinds.getByRole("button", { name: /^Holidays\b/ }).click();
+    await expect(search).toHaveValue("laptop in:tickets -in:holidays ");
+
+    // Keeping again, pressing Tickets a second time takes it out.
+    await panel.getByRole("button", { name: "Keep", exact: true }).click();
+    await tickets.click();
+    await expect(search).toHaveValue("laptop -in:holidays ");
+
+    // Esc puts the picker away; the search stays open until the next one, its key counting the - word still on.
+    await search.press("Escape");
+    await expect(kinds).toHaveCount(0);
+    await expect(panel.getByRole("button", { name: "Kind 1", exact: true })).toBeVisible();
+  });
+
+  test("Who hands over to typing a name, and a bare @ offers you before a letter is typed", async ({ as }) => {
+    const page = await as("super");
+    await gotoRoute(page, "dashboard");
+    await page.keyboard.press("ControlOrMeta+k");
+    const panel = searchPanel(page);
+    const search = searchBox(page);
+    await search.fill("leave");
+
+    await panel.getByRole("button", { name: "Who", exact: true }).click();
+    await panel.getByRole("button", { name: "Someone else…" }).click();
+    await expect(search).toHaveValue("leave @");
+    await expect(search).toBeFocused();
+    await expect(page.getByRole("listbox", { name: "Whose suggestions" }).getByRole("option", { name: "Mine" })).toBeVisible();
+    // A letter and it is the directory's turn.
+    await search.press("a");
+    await expect(page.getByRole("listbox", { name: "Person suggestions" }).getByRole("option").first()).toBeVisible();
   });
 
   test("a misspelt name is offered as the person it was one slip from", async ({ as }) => {
@@ -314,11 +391,13 @@ test.describe("global search", () => {
     await page.keyboard.press("ControlOrMeta+k");
     const panel = searchPanel(page);
     const chip = (name: string) => panel.getByRole("button", { name: new RegExp(`^${name}( \\d+)?$`) });
-    await searchBox(page).fill("leave");
+    // A word the SEED answers in Time (the Casual leave type): a chip with nothing found is disabled, and
+    // "leave" found records only once other specs had filed some, so this passed or not by run order.
+    await searchBox(page).fill("casual");
     await chip("Time").click();
     await expect(chip("Time")).toHaveAttribute("aria-pressed", "true");
     // New words with Time still on: the other chips are counted against these words too, not left blank.
-    await searchBox(page).fill("leave types");
+    await searchBox(page).fill("casual leave");
     await expect(chip("Docs")).toHaveAccessibleName(/^Docs \d+$/, { timeout: 30_000 });
     await expect(chip("People")).toHaveAccessibleName(/^People \d+$/);
   });
@@ -331,8 +410,9 @@ test.describe("global search", () => {
     // The seeded letter templates: records, and plenty of them, grouped by kind under best match.
     await searchBox(page).fill("letter");
     await expect(panel.getByRole("group", { name: "Letter templates" })).toBeVisible({ timeout: 30_000 });
-    await panel.getByRole("button", { name: /^Filters/ }).click();
-    await page.getByRole("menuitemradio", { name: "Newest first" }).click();
+    // The filter bar's toggle writes sort:new into the box.
+    await panel.getByRole("button", { name: "Newest first", exact: true }).click();
+    await expect(searchBox(page)).toHaveValue("letter sort:new ");
     // A seeded row may carry no creation time at all, which is its own group.
     await expect(panel.getByRole("group", { name: /^(Today|Yesterday|This week|This month|Earlier|Date unknown)$/ }).first()).toBeVisible({ timeout: 30_000 });
     await expect(panel.getByRole("group", { name: "Letter templates" })).toHaveCount(0);
@@ -347,9 +427,8 @@ test.describe("global search", () => {
       const search = searchBox(page);
       await search.fill("in:leave-requests ");
 
-      // Filters → Save this search…: the name field takes the chip row, offering the search's own words.
-      await panel.getByRole("button", { name: /^Filters/ }).click();
-      await page.getByRole("menuitem", { name: "Save this search…" }).click();
+      // Save this search: the name field takes the chip row, offering the search's own words.
+      await panel.getByRole("button", { name: "Save this search" }).click();
       const name = panel.getByLabel("Save as");
       await expect(name).toBeFocused();
       await expect(name).toHaveValue("Leave requests");
@@ -484,8 +563,11 @@ test.describe("global search", () => {
 
     // → at the end of the text walks the suggestions, and Enter takes the one it walked to.
     await search.pressSequentially("in:");
-    // The kinds re-rank once their totals land (biggest first), so read them after that, not before.
-    await expect(suggestions.getByRole("option").first()).toHaveText(/\d\+?$/);
+    // The kinds re-rank once their totals land, so read them after that, not before. Waited on as SOME chip
+    // carrying a count, not the first: this person's use of a kind ranks above its total (rankKindOffers), the
+    // use is a preference shared by every session of this login, and a kind the totals leave out has no number
+    // - so whichever other spec last picked such a kind decides what leads.
+    await expect(suggestions.getByRole("option").filter({ hasText: /\d\+?$/ }).first()).toBeVisible();
     const second = suggestions.getByRole("option").nth(1);
     // The chip's text ends in its count; the pill names the kind alone.
     const secondName = ((await second.textContent()) ?? "").trim().replace(/\s*[\d,]+\+?$/, "");
@@ -688,13 +770,21 @@ test.describe("global search", () => {
     const search = searchBox(employee);
     const filters = employee.getByRole("group", { name: "Filters" });
 
-    // The hint bar's "all filters" opens the same guide typing `?` does.
-    await employee.getByRole("button", { name: "? all filters" }).click();
+    // The filter bar's ? opens the same guide typing `?` does.
+    await employee.getByRole("button", { name: "Every filter word" }).click();
     await expect(search).toHaveValue("?");
     await expect(search).toBeFocused();
     // Leaving out is one rule, first in the list, and each filter that has a - form shows it.
     await expect(filters.getByRole("option").first()).toContainText("put - in front of it");
     await expect(filters.getByRole("option").filter({ hasText: "leave out with -status:rejected" })).toBeVisible();
+    // A box that starts with ? lists the filters and nothing else, narrowed by what follows the ?.
+    const results = employee.getByRole("listbox", { name: "Search results" });
+    await expect(results.getByRole("group")).toHaveCount(1);
+    await search.fill("? created");
+    await expect(filters.getByRole("option")).toHaveCount(4);
+    await filters.getByRole("option").filter({ hasText: "on:today" }).click();
+    await expect(search).toHaveValue("on:");
+    await search.fill("?");
 
     // Taking the rule leaves a lone -, which offers the filters it turns round.
     await filters.getByRole("option").first().click();

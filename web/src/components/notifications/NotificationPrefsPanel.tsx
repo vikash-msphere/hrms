@@ -20,12 +20,19 @@ export function NotificationPrefsPanel({ employeeId }: { employeeId: string }) {
   const [muted, setMuted] = useState<string[] | null>(null); // null = not yet loaded
   const [digest, setDigest] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
 
+  // A failed read leaves the panel UNLOADED rather than showing nothing muted: the save writes the whole list,
+  // so a form filled from a failed read would unmute every category the person had turned off.
   useEffect(() => {
+    let live = true;
+    setLoadFailed(false);
     get<NotificationPrefs>(`employees/${employeeId}/notification-prefs`)
-      .then((r) => { setMuted(r.muted ?? []); setDigest(r.digest ?? false); })
-      .catch(() => setMuted([]));
-  }, [employeeId]);
+      .then((r) => { if (live) { setMuted(r.muted ?? []); setDigest(r.digest ?? false); } })
+      .catch(() => live && setLoadFailed(true));
+    return () => { live = false; };
+  }, [employeeId, attempt]);
 
   const toggle = (k: string) =>
     setMuted((m) => (m?.includes(k) ? m.filter((x) => x !== k) : [...(m ?? []), k]));
@@ -48,7 +55,12 @@ export function NotificationPrefsPanel({ employeeId }: { employeeId: string }) {
   return (
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">Turn a category off to stop those notifications for you.</p>
-      {muted === null ? (
+      {muted === null && loadFailed ? (
+        <div className="flex items-center justify-between gap-3 rounded-md border px-3 py-2.5">
+          <p className="text-sm text-muted-foreground">Couldn't load your preferences just now.</p>
+          <Button size="sm" variant="outline" onClick={() => setAttempt((n) => n + 1)}>Try again</Button>
+        </div>
+      ) : muted === null ? (
         <RowsSkeleton rows={6} />
       ) : (
         <div className="divide-y rounded-md border">

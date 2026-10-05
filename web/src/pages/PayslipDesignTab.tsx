@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, ChevronUp, Eye, Plus, RotateCcw, Save, Trash2 } from "lucide-react";
-import { blobUrl, get, patch } from "@/api";
+import { blobUrl } from "@/api";
+import { getSetting, saveSetting } from "@/lib/settingsStore";
 import { cn } from "@/lib/utils";
 import { isConflict } from "@/lib/formError";
 import { useOrg } from "@/lib/org";
@@ -36,27 +37,28 @@ export default function PayslipDesignTab({ toast }: { toast: Toast }) {
   const confirm = useConfirm();
   const { org } = useOrg(); // to say plainly when "print on the letterhead" has no letterhead to print on
   const [template, setTemplate] = useState<PayslipTemplate | null>(null);
-  const [etag, setEtag] = useState<string | undefined>();
+  const [etag, setEtag] = useState<string | null>(null); // null = no stored design, so a save may only create one
+  const [loadFailed, setLoadFailed] = useState(false);
   const [saved, setSaved] = useState<string>(""); // serialized baseline, for the dirty check
   const [saving, setSaving] = useState(false);
   const [open, setOpen] = useState<number | null>(null);
 
-  // Load the saved design; an unset blob means "the stock design" (the server's own fallback).
+  // Load the saved design; an unset blob means "the stock design" (the server's own fallback). A read that did
+  // not land is NOT unset: the editor stays unloaded, because a save from the stock design it would otherwise
+  // show replaces the organization's real one.
   useEffect(() => {
     let live = true;
-    get<{ value?: PayslipTemplate; etag?: string }>("settings/payslip")
-      .then((row) => {
-        if (!live) return;
-        const t = row.value?.blocks?.length ? row.value : DEFAULT_PAYSLIP_TEMPLATE;
-        setTemplate(t);
-        setSaved(JSON.stringify(t));
-        setEtag(row.etag);
-      })
-      .catch(() => {
-        if (!live) return;
-        setTemplate(DEFAULT_PAYSLIP_TEMPLATE);
-        setSaved(JSON.stringify(DEFAULT_PAYSLIP_TEMPLATE));
-      });
+    void getSetting<PayslipTemplate>("payslip").then((s) => {
+      if (!live) return;
+      if (s.unknown) {
+        setLoadFailed(true);
+        return;
+      }
+      const t = s.value?.blocks?.length ? s.value : DEFAULT_PAYSLIP_TEMPLATE;
+      setTemplate(t);
+      setSaved(JSON.stringify(t));
+      setEtag(s.version ?? null);
+    });
     return () => { live = false; };
   }, []);
 
@@ -113,16 +115,15 @@ export default function PayslipDesignTab({ toast }: { toast: Toast }) {
     if (!template) return;
     setSaving(true);
     try {
-      const row = await patch<{ etag?: string }>("settings/payslip", { value: template }, etag);
-      setEtag(row.etag);
+      setEtag((await saveSetting("payslip", { value: template }, etag)) ?? null);
       setSaved(JSON.stringify(template));
       toast({ title: "Payslip design saved", description: "Applies to payslips generated from now on.", variant: "success" });
     } catch (e) {
       // Another admin saved the design while it was open here. Take THEIR etag so the next press goes through:
       // keeping the stale one refused every Save after this, identically, until the page was reloaded.
       if (isConflict(e)) {
-        const fresh = await get<{ etag?: string }>("settings/payslip").catch(() => null);
-        if (fresh) setEtag(fresh.etag);
+        const fresh = await getSetting<PayslipTemplate>("payslip");
+        if (!fresh.unknown) setEtag(fresh.version ?? null);
         toast({
           title: "Somebody else changed the design",
           description: "Another admin saved the payslip design while you had it open. Your version is still on screen: press Save again to replace theirs, or reload the page to see what they changed first.",
@@ -182,6 +183,7 @@ export default function PayslipDesignTab({ toast }: { toast: Toast }) {
 
   const tokenHelp = useMemo(() => PAYSLIP_TOKENS.map((t) => `{{${t}}}`).join("  "), []);
 
+  if (!template && loadFailed) return <p className="text-sm text-muted-foreground">Couldn't load the payslip design just now. Reload the page to edit it.</p>;
   if (!template) return <PanelSkeleton />;
 
   // Which page these payslips print on, and whether the letterhead it needs actually exists. The page-level

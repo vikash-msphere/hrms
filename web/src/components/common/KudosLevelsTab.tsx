@@ -13,7 +13,8 @@ import { Button } from "@/components/ui/button";
 import { AccessAction } from "@/components/access/AccessAction";
 import { useToast } from "@/components/ui/use-toast";
 import { useUnsaved } from "@/components/common/UnsavedChanges";
-import { getSetting, saveSetting } from "@/lib/settingsStore";
+import { getSettingForEdit, saveSetting } from "@/lib/settingsStore";
+import { PanelSkeleton } from "@/components/common/Skeletons";
 
 // HR editor for the kudos config (settings/kudos): the recognition LEVELS (weighted tiers feeding the
 // leaderboard) and the CATEGORIES (a flat, optional taxonomy for tagging recognition), each with optional
@@ -27,14 +28,18 @@ export function KudosLevelsTab() {
   const [ready, setReady] = useState(false);
   const [saving, setSaving] = useState(false);
 
+  // Ready only on a read that landed. The save writes the whole blob, so a form built on a failed read would
+  // put the defaults over the org's real levels and categories.
   useEffect(() => {
-    getSetting<{ levels?: KudosLevel[]; categories?: KudosCategory[] }>("kudos")
-      .then((s) => {
+    getSettingForEdit<{ levels?: KudosLevel[]; categories?: KudosCategory[] }>("kudos").then(
+      (s) => {
         if (s.value?.levels?.length) setLevels(s.value.levels);
         if (Array.isArray(s.value?.categories)) setCategories(s.value!.categories!);
-      })
-      .catch(() => { /* keep defaults */ })
-      .finally(() => setReady(true));
+        setReady(true); // batched with the setters above, so the unsaved baseline captures the loaded value
+      },
+      () => toast({ title: "Couldn't load the kudos config", description: "Reload the page before editing; nothing here can be saved until it loads.", variant: "destructive" }),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- read once at mount
   }, []);
 
   const setRow = (i: number, p: Partial<KudosLevel>) => setLevels((ls) => ls.map((l, j) => (j === i ? { ...l, ...p } : l)));
@@ -79,6 +84,9 @@ export function KudosLevelsTab() {
     }
   }
 
+  // No live inputs before the config lands: a category added on the empty defaults was replaced by the
+  // hydration, and Save then wrote the stored list back with a green toast.
+  if (!ready) return <PanelSkeleton />;
   return (
     <Card>
       <CardHeader>

@@ -64,8 +64,11 @@ export const SEARCH_INDEX: SearchEntry[] = [
   { collection: "leave-types", table: schema.leaveTypes, scoping: flat, match: ["name"], title: ["name"], noun: "Leave type" },
   { collection: "holidays", table: schema.holidays, scoping: flat, match: ["name", "kind"], title: ["name"], subtitle: ["kind"],
     noun: "Holiday", embedSubtitle: false },
+  // `source` is NOT matched: it is a two-value enum (`clock` / `correction`) on every punch, so indexing it put the
+  // same word into the keyword index once per clock-in and matched nothing a person would type it to find. A punch
+  // without a note has no words, so it has no keyword row at all (src/db/searchDdl.ts) and is reached by `in:`.
   { collection: "attendance", table: schema.attendanceSessions, scoping: scoped("employeeId"),
-    match: ["note", "source"], title: ["note"], subtitle: ["source"] },
+    match: ["note"], title: ["note"], subtitle: ["source"] },
   { collection: "attendance-regularizations", table: schema.attendanceRegularizations, scoping: scoped("employeeId"),
     match: ["reason", "state"], title: ["reason"], subtitle: ["state"] },
   { collection: "overtime-requests", table: schema.overtimeRequests, scoping: scoped("employeeId"),
