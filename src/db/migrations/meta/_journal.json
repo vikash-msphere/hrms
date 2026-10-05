@@ -85,6 +85,13 @@
       "when": 1791153047383,
       "tag": "0011_search_counts_titled",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1791178120307,
+      "tag": "0012_search_write_guards",
+      "breakpoints": true
     }
   ]
 }

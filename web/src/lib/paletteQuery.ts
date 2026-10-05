@@ -22,7 +22,7 @@
 // cannot be kept that way - as a word it would ASK for what it means to leave out - so it marks the query
 // `incomplete` and nothing is sent until it names one person.
 
-import { collectionsNamed, inWordOf } from "../../../src/domain/entityNames";
+import { collectionsNamed, inWordOf, namesOf } from "../../../src/domain/entityNames";
 
 export type PalettePerson = { id: string; first: string; last: string };
 export type PaletteDepartment = { name: string };
@@ -199,7 +199,8 @@ export type FilterVocabulary = readonly { collection: string; statuses: readonly
 // `negate`: the `-` form, which leaves out what the plain form keeps.
 export type FilterSuggestion<P extends PalettePerson = PalettePerson> =
   // `prefix`: the kind's name or `in:` word STARTS with what is typed, rather than one of its later words.
-  | { kind: "in"; token: string; collection: string; negate?: true; prefix?: true }
+  // `named`: every kind the token names, when it names more than one (`in:leave`, offered for a typed word).
+  | { kind: "in"; token: string; collection: string; negate?: true; prefix?: true; named?: readonly string[] }
   | { kind: "status"; token: string; status: string; collections: string[]; negate?: true }
   | { kind: "person"; token: string; person: P; negate?: true }
   | { kind: "is"; token: string; value: "mine" | "team"; negate?: true }
@@ -217,9 +218,9 @@ type GuideEntry = {
 };
 
 /**
- * Every filter word, for the guide `?` opens: what each one does and an example of it. The hint bar under the
- * palette has room for a few of these; this is where the rest are found. A key is inserted bare (`dept:`), so
- * its own completions take over from there.
+ * Every filter word, for the guide `?` opens: what each one does and an example of it. The filter bar under the
+ * results offers every key in plain words, to press; this is where each one's syntax is spelt out. A key is
+ * inserted bare (`dept:`), so its own completions take over from there.
  *
  * Leaving something out is one rule, not a list of special keys: a `-` in front of any filter that has a `not`
  * form below. The guide says so once, in its own row, and each such filter shows its `-` form beside it.
@@ -257,6 +258,20 @@ const NEGATABLE = new Set(FILTER_GUIDE.flatMap((g) => (g.not ? [g.key.replace(/:
 
 /** The word that opens the filter guide. */
 export const GUIDE_WORD = "?";
+
+/**
+ * A box that STARTS with `?` asks about the filters and nothing else: the list is the guide alone, narrowed by
+ * what follows the `?`, and no records are searched. A lone `?` later in the box opens the guide above the
+ * results instead.
+ */
+export const isGuideQuery = (raw: string) => raw.trimStart().startsWith(GUIDE_WORD);
+
+// The guide's rows, less the keys in `taken`; the `-` rule first, since it applies to most of what follows.
+const guideRows = (taken: ReadonlySet<string>): FilterSuggestion<never>[] => [
+  { kind: "key" as const, token: LEAVE_OUT_GUIDE.key, label: LEAVE_OUT_GUIDE.label, example: LEAVE_OUT_GUIDE.example },
+  ...FILTER_GUIDE.filter((g) => !taken.has(g.key))
+    .map((g) => ({ kind: "key" as const, token: g.key, label: g.label, example: g.example, ...(g.not ? { leaveOut: g.not.example } : {}) })),
+];
 
 /** The whitespace-delimited word the caret is in (or at the end of), as its span in `raw`. */
 export function tokenAt(raw: string, caret: number): { start: number; end: number; text: string } {
@@ -297,19 +312,45 @@ const monthOf = (day: string, back: number) => {
   return d.toISOString().slice(0, 7);
 };
 
+/** What the filter offers are made from: everything the palette holds about the caller's world. */
+export type FilterContext<P extends PalettePerson> = {
+  people: readonly P[];
+  vocabulary: FilterVocabulary | null;
+  labelOf: (collection: string) => string;
+  today: string; // the org-local day, YYYY-MM-DD
+  daysAgo30: string; // the org-local day thirty days back
+  departments?: readonly PaletteDepartment[] | null; // the ones the caller may list, once loaded
+  // The caller as an employee, with the people who report to them; null for a caller with no employee record,
+  // to whom "mine" and "my team" mean nothing (routes/search.ts).
+  self?: { reports: readonly P[] } | null;
+};
+
+const compactName = (s: string) => s.replace(/\s+/g, "").toLowerCase();
+
+/**
+ * The shortest `@` handle that names this one person: the first name when nobody else has it, else the whole
+ * name. Null for somebody no handle singles out (two people with one name), who cannot be named by `@` at all.
+ */
+export function handleFor<P extends PalettePerson>(person: P, people: readonly P[]): string | null {
+  return [person.first, `${person.first}${person.last}`].map(compactName).find((h) => resolvePerson(h, people) === person) ?? null;
+}
+
 export function suggestFilters<P extends PalettePerson>(
   raw: string,
   caret: number,
-  ctx: {
-    people: readonly P[];
-    vocabulary: FilterVocabulary | null;
-    labelOf: (collection: string) => string;
-    today: string; // the org-local day, YYYY-MM-DD
-    daysAgo30: string; // the org-local day thirty days back
-    departments?: readonly PaletteDepartment[] | null; // the ones the caller may list, once loaded
-  },
+  ctx: FilterContext<P>,
   limit = 8,
 ): { start: number; end: number; items: FilterSuggestion<P>[] } | null {
+  if (isGuideQuery(raw)) {
+    // The whole box is the question, wherever the caret is: each word after the `?` must appear in a row's
+    // key, description or examples (`?created` finds the four date filters). A row taken replaces all of it.
+    const words = raw.trimStart().slice(GUIDE_WORD.length).toLowerCase().split(/\s+/).filter(Boolean);
+    const items = guideRows(new Set()).filter((s) => {
+      const text = s.kind === "key" ? `${s.token} ${s.label} ${s.example} ${s.leaveOut ?? ""}`.toLowerCase() : "";
+      return words.every((w) => text.includes(w));
+    });
+    return { start: 0, end: raw.length, items }; // empty when nothing matches, and still no record search
+  }
   const span = tokenAt(raw, caret);
   const word = span.text.toLowerCase();
   // A leading `-` turns the filter round; everything after it is completed exactly as the plain filter is, and
@@ -327,8 +368,7 @@ export function suggestFilters<P extends PalettePerson>(
   let items: FilterSuggestion<P>[] = [];
 
   if (word === GUIDE_WORD) {
-    // Every key, less the ones the query already holds and cannot hold twice; the `-` rule first, since it
-    // applies to most of what follows.
+    // Every key, less the ones the query already holds and cannot hold twice.
     const taken = new Set([
       ...(others.owner ? ["@"] : []),
       ...(others.mine || others.team ? ["is:"] : []),
@@ -338,12 +378,7 @@ export function suggestFilters<P extends PalettePerson>(
       ...(others.before ? ["before:", "on:", "during:"] : []),
       ...(others.sort ? ["sort:"] : []),
     ]);
-    items = [
-      { kind: "key" as const, token: LEAVE_OUT_GUIDE.key, label: LEAVE_OUT_GUIDE.label, example: LEAVE_OUT_GUIDE.example },
-      ...FILTER_GUIDE.filter((g) => !taken.has(g.key))
-        .map((g) => ({ kind: "key" as const, token: g.key, label: g.label, example: g.example, ...(g.not ? { leaveOut: g.not.example } : {}) })),
-    ];
-    return { start: span.start, end: span.end, items }; // the whole guide, not a page of it
+    return { start: span.start, end: span.end, items: guideRows(taken) }; // the whole guide, not a page of it
   } else if (word === "-") {
     // A `-` on its own: the filters it can turn round, each described by what its `-` form does. Every one can
     // be used again for another value; only `-is:` runs out, once mine and my team are both left out.
@@ -388,18 +423,30 @@ export function suggestFilters<P extends PalettePerson>(
     items = !others.sort && matches(typed, "new") ? [{ kind: "sort", token: "sort:new" }] : [];
   } else if (key === "@") {
     // And people: one `@name`, any number of `-@name`, never one already named either way.
-    if (!typed || (!negate && others.owner)) return null;
+    if (!negate && (others.owner || (!typed && (others.mine || others.team)))) return null;
     const named = new Set([...(others.owner ? [others.owner.id] : []), ...others.notOwners.map((p) => p.id)]);
-    const compact = (s: string) => s.replace(/\s+/g, "").toLowerCase();
-    items = ctx.people
-      .filter((p) => !named.has(p.id) && matches(typed, p.first, p.last, compact(`${p.first}${p.last}`)))
-      .sort((a, b) => `${a.first} ${a.last}`.localeCompare(`${b.first} ${b.last}`))
-      .flatMap((p) => {
-        // The shortest handle that means this one person: the first name when nobody else has it, else the
-        // whole name. Somebody no handle singles out (two people with one name) is not offered at all.
-        const handle = [p.first, `${p.first}${p.last}`].map(compact).find((h) => resolvePerson(h, ctx.people) === p);
-        return handle ? [{ kind: "person" as const, token: `${sign}@${handle}`, person: p, ...not }] : [];
-      });
+    const person = (p: P) => {
+      // Somebody no handle singles out (two people with one name) is not offered at all.
+      const handle = handleFor(p, ctx.people);
+      return handle ? [{ kind: "person" as const, token: `${sign}@${handle}`, person: p, ...not }] : [];
+    };
+    const byName = (a: P, b: P) => `${a.first} ${a.last}`.localeCompare(`${b.first} ${b.last}`);
+    if (!typed) {
+      // A bare `@`, before a letter is typed: the people a search is most often about - you, your team, the
+      // people who report to you. `-@` offers the same, turned round. A caller with no employee record has none.
+      if (!ctx.self) return null;
+      const left = (v: "mine" | "team") => (v === "mine" ? others.mine || others.notMine : others.team || others.notTeam);
+      const owners = (["mine", "team"] as const).filter((v) => (v === "mine" || ctx.self!.reports.length > 0) && !left(v));
+      items = [
+        ...owners.map((value) => ({ kind: "is" as const, token: `${sign}is:${value}`, value, ...not })),
+        ...ctx.self.reports.filter((p) => !named.has(p.id)).sort(byName).flatMap(person),
+      ];
+    } else {
+      items = ctx.people
+        .filter((p) => !named.has(p.id) && matches(typed, p.first, p.last, compactName(`${p.first}${p.last}`)))
+        .sort(byName)
+        .flatMap(person);
+    }
   } else if (key === "is") {
     // Mine and my team are two different owners, so one of them already there rules out the other. Leaving one
     // out is not ruled out by anything but leaving it out already, or asking for it.
@@ -441,6 +488,277 @@ export function suggestFilters<P extends PalettePerson>(
   // `rankKindOffers` on signals this function does not have (results, the page, the person's use) - so cutting
   // here would cut alphabetically, and the kinds that matter most could go unoffered.
   return { start: span.start, end: span.end, items: key === "in" ? items : items.slice(0, limit) };
+}
+
+// ---- The filter bar -----------------------------------------------------------------------------------------
+// The filter words as the bar under the results offers them to press (CommandPalette.tsx FilterBar): a key per
+// kind of narrowing, each key's choices, and the filters the typed words name. Every one is a token
+// `parsePaletteQuery` reads back, written into the box, so a press can never make a filter the search ignores.
+
+/**
+ * The bar's keys: what kind of record, whose, in which department, in what status, created when. Newest first is
+ * an order rather than a narrowing, so it is a toggle beside them (`sort`) rather than a key.
+ */
+export type Facet = "kind" | "who" | "dept" | "status" | "when";
+
+const FACET_OF_KEY = new Map<string, Facet | "sort">([
+  ["in", "kind"], ["is", "who"], ["dept", "dept"], ["status", "status"],
+  ["after", "when"], ["before", "when"], ["on", "when"], ["during", "when"], ["sort", "sort"],
+]);
+
+/** The key a filter word belongs to and whether it leaves out (`-`); null for a word that is not a filter. */
+export function facetOf(word: string): { facet: Facet | "sort"; negate: boolean } | null {
+  const negate = word.startsWith("-");
+  const body = negate ? word.slice(1) : word;
+  if (body.startsWith("@")) return body.length > 1 ? { facet: "who", negate } : null;
+  const colon = body.indexOf(":");
+  if (colon <= 0 || colon === body.length - 1) return null;
+  const facet = FACET_OF_KEY.get(body.slice(0, colon).toLowerCase());
+  // The dates and `sort:` have no `-` form: `-after:7d` is a plain word.
+  if (!facet || (negate && (facet === "when" || facet === "sort"))) return null;
+  return { facet, negate };
+}
+
+// Every word in `raw`, with where it sits.
+const wordsOf = (raw: string) => [...raw.matchAll(/\S+/g)].map((m) => ({ start: m.index ?? 0, end: (m.index ?? 0) + m[0].length, word: m[0] }));
+
+// `raw` without the words at `spans` - last first, so each cut leaves the earlier positions where they were - and
+// with the gaps they leave closed up.
+const cut = (raw: string, spans: readonly { start: number; end: number }[]) => {
+  let out = raw;
+  for (const s of [...spans].sort((a, b) => b.start - a.start)) out = out.slice(0, s.start) + out.slice(s.end);
+  return out.replace(/\s+/g, " ").trimStart();
+};
+
+/** One of a key's choices in the bar, and the words in the box that already say it - empty when it is off. */
+export type FacetOffer<P extends PalettePerson = PalettePerson> = { suggestion: FilterSuggestion<P>; pressedBy: string[] };
+
+/**
+ * A key's choices for the bar's picker, keeping or (`leaveOut`) leaving out. Asked of `suggestFilters` as if the
+ * key had just been typed after the box's other words, with this key's own words taken out first - so a choice
+ * already made is offered too, and pressed (`pressedBy`), rather than left out as used. Who is you, your team and
+ * the people who report to you, then anybody already named; When is a fixed list of dates (`whenPresets`).
+ * Status is scoped by the box's `in:` words, so a caller passes a category's `in:` words in `raw` for that key.
+ */
+export function facetOffers<P extends PalettePerson>(facet: Facet, raw: string, ctx: FilterContext<P> & { leaveOut: boolean }): FacetOffer<P>[] {
+  if (isGuideQuery(raw)) return [];
+  const leaveOut = ctx.leaveOut && facet !== "when";
+  const sign = leaveOut ? "-" : "";
+  const not = leaveOut ? { negate: true as const } : {};
+  const own = wordsOf(raw).filter((w) => {
+    const f = facetOf(w.word);
+    return f?.facet === facet && f.negate === leaveOut;
+  });
+  const rest = cut(raw, own);
+  const pressedBy = (says: (word: string) => boolean) => own.map((w) => w.word).filter(says);
+
+  if (facet === "when") {
+    return whenPresets(ctx.today).map((p) => ({
+      suggestion: { kind: "date" as const, token: p.token, label: p.label },
+      pressedBy: pressedBy((w) => w.toLowerCase() === p.token),
+    }));
+  }
+  if (facet === "who") {
+    const others = parsePaletteQuery(rest, ctx.people, ctx.today);
+    const offers: FacetOffer<P>[] = [];
+    // Never a choice the box already makes the other way round: `is:mine -is:mine` finds nothing.
+    if (ctx.self) {
+      for (const value of ["mine", "team"] as const) {
+        if (value === "team" && !ctx.self.reports.length) continue;
+        if (leaveOut ? (value === "mine" ? others.mine : others.team) : (value === "mine" ? others.notMine : others.notTeam)) continue;
+        const token = `${sign}is:${value}`;
+        offers.push({ suggestion: { kind: "is", token, value, ...not }, pressedBy: pressedBy((w) => w.toLowerCase() === token) });
+      }
+    }
+    // The people the box already names, first, then the caller's reports, each once.
+    const named = own.flatMap((w) => {
+      const body = w.word.slice(sign.length);
+      const who = body.startsWith("@") ? resolvePerson(body.slice(1), ctx.people) : null;
+      return who ? [{ word: w.word, person: who as P }] : [];
+    });
+    const seen = new Set<string>();
+    const person = (p: P) => {
+      const handle = handleFor(p, ctx.people);
+      if (!handle || seen.has(p.id)) return;
+      seen.add(p.id);
+      if (leaveOut ? others.owner?.id === p.id : others.notOwners.some((o) => o.id === p.id)) return;
+      offers.push({ suggestion: { kind: "person", token: `${sign}@${handle}`, person: p, ...not }, pressedBy: named.filter((n) => n.person === p).map((n) => n.word) });
+    };
+    for (const n of named) person(n.person);
+    for (const p of [...(ctx.self?.reports ?? [])].sort((a, b) => `${a.first} ${a.last}`.localeCompare(`${b.first} ${b.last}`))) person(p);
+    return offers;
+  }
+  const key = `${sign}${facet === "kind" ? "in" : facet}:`;
+  const asked = rest ? `${rest.trimEnd()} ${key}` : key;
+  const found = suggestFilters(asked, asked.length, ctx, Number.MAX_SAFE_INTEGER)?.items ?? [];
+  const kinds = (ctx.vocabulary ?? []).map((v) => v.collection);
+  const valueOf = (w: string) => w.slice(w.indexOf(":") + 1);
+  return found.map((s) => ({
+    suggestion: s,
+    pressedBy: pressedBy((w) =>
+      s.kind === "in" ? collectionsNamedBy(valueOf(w), kinds).includes(s.collection)
+        : s.kind === "dept" ? deptSlug(valueOf(w)) === deptSlug(s.department.name)
+        : w.toLowerCase() === s.token.toLowerCase()),
+  }));
+}
+
+/**
+ * The box after a press on one of the bar's choices. A choice that is on comes out - every word that says it. One
+ * that is off goes in at the end, ready for the next word; a key that holds one value (a plain `status:`, `dept:`,
+ * owner, date or order) swaps its word for the new one rather than adding a second, which the search would read
+ * as only the last. `in:` and every `-` form add up, so they only ever add.
+ */
+export function applyFacetPick(raw: string, pick: { token: string; pressedBy: readonly string[] }): string {
+  const words = wordsOf(raw);
+  if (pick.pressedBy.length) {
+    const out = new Set(pick.pressedBy.map((w) => w.toLowerCase()));
+    return cut(raw, words.filter((w) => out.has(w.word.toLowerCase())));
+  }
+  const f = facetOf(pick.token);
+  const single = f && !f.negate && f.facet !== "kind" ? f.facet : null;
+  const kept = single ? cut(raw, words.filter((w) => {
+    const g = facetOf(w.word);
+    return g?.facet === single && !g.negate;
+  })) : raw;
+  const head = kept.trimEnd();
+  return `${head}${head ? " " : ""}${pick.token} `;
+}
+
+/**
+ * The When choices, in the order a person reaches for them. Relative words stay relative in the box (`on:today`,
+ * `after:7d`), so a saved search keeps meaning "the last 7 days" rather than the week it was saved in.
+ */
+export function whenPresets(today: string): { token: string; label: string }[] {
+  const year = today.slice(0, 4);
+  return [
+    { token: "on:today", label: "Today" },
+    { token: "on:yesterday", label: "Yesterday" },
+    { token: "after:7d", label: "Last 7 days" },
+    { token: "after:30d", label: "Last 30 days" },
+    { token: `during:${today.slice(0, 7)}`, label: "This month" },
+    { token: `during:${monthOf(today, 1)}`, label: "Last month" },
+    { token: `during:${year}`, label: "This year" },
+    { token: `before:${year}-01`, label: "Before this year" },
+  ];
+}
+
+/**
+ * How many of `days` (each result's org-local creation day, YYYY-MM-DD) each When choice would keep - by the
+ * window the search reads its word as (`parsePaletteQuery`), so a count is what pressing the choice leaves.
+ */
+export function whenCounts(days: readonly string[], today: string): Map<string, number> {
+  // A month or a year as the day it starts on.
+  const start = (v: string) => (v.length === 4 ? `${v}-01-01` : v.length === 7 ? `${v}-01` : v);
+  const out = new Map<string, number>();
+  for (const p of whenPresets(today)) {
+    const q = parsePaletteQuery(p.token, [], today);
+    const from = q.after ? start(q.after) : null;
+    const to = q.before ? start(q.before) : null;
+    out.set(p.token, days.filter((d) => (!from || d >= from) && (!to || d < to)).length);
+  }
+  return out;
+}
+
+/** A filter a typed word (or two) names, and where those words sit in the box: taking it puts it in their place. */
+export type WordFilter<P extends PalettePerson = PalettePerson> = { start: number; end: number; words: string; suggestion: FilterSuggestion<P> };
+
+const MONTH_NAMES = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
+// A month by its name or its first three letters, and `sept`.
+const monthNumber = (word: string) => {
+  const i = MONTH_NAMES.findIndex((m) => m === word || (word.length >= 3 && m.slice(0, 3) === word) || (m === "september" && word === "sept"));
+  return i < 0 ? 0 : i + 1;
+};
+const plural = (a: string, b: string) => a === `${b}s` || a === `${b}es`;
+
+/**
+ * The filters the plain words in the box name, for the bar's "Filter by" - `pending` is Status: Pending, `leave`
+ * is the leave kinds, `priya` is Priya Shah, `my` is Mine, `september` is last September (or this one), `newest`
+ * is Newest first - the first `limit` of them, in the order the words were typed. Exact names only, never the
+ * start of one, so a word half typed (`pend`) or one that merely begins a name (`lea`) names nothing. A key the
+ * box already sets (one status, one owner, one date window) offers nothing more.
+ *
+ * `kinds` are the collections the caller can search; `scope`, the ones a category chip narrows to, whose
+ * statuses are the ones meant when no `in:` is typed.
+ */
+export function filtersForWords<P extends PalettePerson>(
+  raw: string,
+  ctx: FilterContext<P> & { kinds: readonly string[]; scope?: readonly string[] },
+  limit = 3,
+): WordFilter<P>[] {
+  if (isGuideQuery(raw)) return [];
+  const q = parsePaletteQuery(raw, ctx.people, ctx.today);
+  const words = wordsOf(raw);
+  // A plain word: letters and digits, not a filter word, a `-` or `@` form, or a `?`.
+  const plain = (i: number) => i < words.length && /^[\p{L}\p{N}][\p{L}\p{N}'_-]*$/u.test(words[i]!.word);
+  const out: WordFilter<P>[] = [];
+  const offer = (from: number, to: number, suggestion: FilterSuggestion<P>) => {
+    if (out.some((o) => o.suggestion.token === suggestion.token)) return;
+    out.push({ start: words[from]!.start, end: words[to]!.end, words: raw.slice(words[from]!.start, words[to]!.end), suggestion });
+  };
+  const dated = !!q.after || !!q.before;
+  const owned = !!q.owner || q.mine || q.team;
+  const team = !!ctx.self?.reports.length;
+  const vocab = ctx.vocabulary ?? [];
+  const inPlay = q.in.length
+    ? new Set(q.in.flatMap((w) => collectionsNamedBy(w, vocab.map((v) => v.collection))))
+    : ctx.scope?.length ? new Set(ctx.scope) : null;
+  const statuses = new Set(vocab.filter((v) => !inPlay || inPlay.has(v.collection)).flatMap((v) => v.statuses));
+  const namedKinds = new Set([...q.in, ...q.notIn].flatMap((w) => collectionsNamedBy(w, ctx.kinds)));
+  const year = ctx.today.slice(0, 4);
+  const month = Number(ctx.today.slice(5, 7));
+  const date = (label: string, token: string) => ({ kind: "date" as const, token, label });
+
+  for (let i = 0; i < words.length && out.length < limit; i++) {
+    if (!plain(i)) continue;
+    const word = words[i]!.word.toLowerCase();
+    // Two words that make one filter come first, so "my team" is My team rather than Mine.
+    const pair = plain(i + 1) ? `${word} ${words[i + 1]!.word.toLowerCase()}` : "";
+    const paired =
+      pair === "my team" ? (ctx.self && team && !owned ? { kind: "is" as const, token: "is:team", value: "team" as const } : null)
+      : dated ? null
+      : pair === "this month" ? date("This month", `during:${ctx.today.slice(0, 7)}`)
+      : pair === "last month" ? date("Last month", `during:${monthOf(ctx.today, 1)}`)
+      : pair === "this year" ? date("This year", `during:${year}`)
+      : pair === "last year" ? date("Last year", `during:${Number(year) - 1}`)
+      : null;
+    if (paired) {
+      offer(i, i + 1, paired);
+      i++;
+      continue;
+    }
+    if ((word === "mine" || word === "my") && ctx.self && !owned) offer(i, i, { kind: "is", token: "is:mine", value: "mine" });
+    if ((word === "newest" || word === "latest" || word === "recent") && !q.sort) offer(i, i, { kind: "sort", token: "sort:new" });
+    if (!dated) {
+      if (word === "today" || word === "yesterday") offer(i, i, date(word === "today" ? "Today" : "Yesterday", `on:${word}`));
+      const m = monthNumber(word);
+      if (m) {
+        // The latest such month not after this one: in October, `september` is last month and `november` a year ago.
+        const y = m <= month ? Number(year) : Number(year) - 1;
+        offer(i, i, date(`${MONTH_NAMES[m - 1]!.charAt(0).toUpperCase()}${MONTH_NAMES[m - 1]!.slice(1)} ${y}`, `during:${y}-${String(m).padStart(2, "0")}`));
+      }
+      if (/^20\d{2}$/.test(word) && word <= year) offer(i, i, date(word, `during:${word}`));
+    }
+    const status = [word, word.replace(/-/g, "_")].find((s) => statuses.has(s));
+    if (status && !q.status && !q.notStatuses.includes(status)) offer(i, i, { kind: "status", token: `status:${status}`, status, collections: vocab.filter((v) => v.statuses.includes(status)).map((v) => v.collection) });
+    if (word.length >= 3) {
+      // A kind by one of its names, or by the first word of one (`leave` names Leave requests and Leave types), in
+      // the singular or the plural - and then what the server reads the word as (`collectionsNamedBy`).
+      const whole = (n: string) => [n, n.split("-")[0]!].some((x) => x === word || plural(x, word) || plural(word, x));
+      const named = collectionsNamedBy(word, ctx.kinds);
+      if (named.some((c) => namesOf(c).some(whole)) && named.some((c) => !namedKinds.has(c))) {
+        const one = named.length === 1;
+        offer(i, i, { kind: "in", token: `in:${one ? inWordOf(named[0]!, ctx.kinds) : word}`, collection: named[0]!, ...(one ? {} : { named }) });
+      }
+    }
+    const who = resolvePerson(word, ctx.people) as P | null;
+    if (who && !owned && !q.notOwners.some((p) => p.id === who.id) && [who.first, who.last, `${who.first}${who.last}`].some((n) => compactName(n) === word)) {
+      const handle = handleFor(who, ctx.people);
+      if (handle) offer(i, i, { kind: "person", token: `@${handle}`, person: who });
+    }
+    const dept = ctx.departments?.find((d) => deptSlug(d.name) === deptSlug(word));
+    if (dept && !q.dept && !q.notDepts.includes(deptSlug(dept.name))) offer(i, i, { kind: "dept", token: `dept:${deptSlug(dept.name)}`, department: dept });
+  }
+  return out.slice(0, limit);
 }
 
 /** What the `in:` suggestions are ranked by (`rankKindOffers`), each as the palette knows it. */

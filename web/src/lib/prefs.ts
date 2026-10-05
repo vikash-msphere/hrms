@@ -1,4 +1,4 @@
-import { get, listAll, patch } from "@/api";
+import { ApiError, get, listAll, patch } from "@/api";
 import { storedIdentity } from "@/lib/clientStore";
 import { publish, subscribeTopic } from "@/lib/crossTabBus";
 
@@ -35,6 +35,16 @@ let loaded: Promise<Map<string, unknown>> | null = null;
 // can hand back, so it wins, and the read still happens.
 const staged = new Map<string, unknown>();
 
+// Set when this page life's read of the collection FAILED. Every key then reads as absent, which is the right
+// degradation for rendering (defaults) and the wrong basis for a write: a consumer hydrated from it holds the
+// defaults, and its next save would replace whatever the person really has stored - their layout, their table
+// views, another device's push subscription. So while it is set every write is create-only (`If-None-Match: *`)
+// and nothing is recorded as unconfirmed, which keeps the next page life from re-sending a value built on
+// nothing. It stays set for the page life: consumers hydrate once, so a later successful read would not make
+// the values they already hold any less baseless. A reload reads again.
+let snapshotUnknown = false;
+const blindWrite = () => (snapshotUnknown ? { headers: { "If-None-Match": "*" } } : undefined);
+
 // Follows the cursor rather than asking for a page size the server will not grant: `max: 200` was clamped to
 // 100 silently (api.ts#listPath), and a preference that fell past the page read as ABSENT - i.e. as the
 // default - which is indistinguishable from never having been set. One request in practice; a caller with
@@ -42,7 +52,10 @@ const staged = new Map<string, unknown>();
 function load(): Promise<Map<string, unknown>> {
   return (loaded ??= listAll<Row>("preferences")
     .then((rows) => new Map(rows.map((p) => [p.key, p.value])))
-    .catch(() => new Map<string, unknown>()) // no rows / offline: every key reads as absent
+    .catch(() => {
+      snapshotUnknown = true; // offline / unreadable: every key reads as absent, and writes may only create
+      return new Map<string, unknown>();
+    })
     .then(adoptUnconfirmed)
     .then((all) => {
       // After `adoptUnconfirmed`, not before: what a previous page life failed to confirm is older than what
@@ -61,35 +74,64 @@ export async function readPref<T>(key: string): Promise<T | undefined> {
 }
 
 /**
- * Re-read ONE preference from the server, bypassing the page-life snapshot, and refresh the snapshot with it.
- *
- * For the read-modify-write case, which the memoized snapshot is wrong for. A preference whose value is a LIST
- * that several writers append to - `push_subscriptions`, one entry per device - is read here, edited, and
- * PATCHed back whole, with no `If-Match` and no server-side merge. A tab open since before another device
- * enrolled holds that device's absence in the snapshot, so enabling (or disabling) push in this browser wrote
- * the stale list back and silently dropped the other device's subscription.
- *
- * Falls back to the snapshot when the row cannot be read (never written yet, or offline): that is the same
- * answer as before, not a reason to refuse the write.
+ * Whether this page life's read landed, so an absent key really means "no row". For a consumer that acts on
+ * absence itself - seeding the server from this browser - since `readPref` reads as absent either way.
  */
-export async function refetchPref<T>(key: string): Promise<T | undefined> {
-  try {
-    const row = await get<{ value?: unknown }>(`preferences/${key}`);
-    const v = row?.value;
-    apply(key, v);
-    return v === undefined || v === null ? undefined : (v as T);
-  } catch {
-    return readPref<T>(key);
+export async function prefsKnown(): Promise<boolean> {
+  await load();
+  return !snapshotUnknown;
+}
+
+/**
+ * Change ONE preference by reading it fresh, editing that, and writing the result back guarded on the version
+ * it was read at. Resolves to the value written; rejects when the row cannot be read or the write is refused.
+ *
+ * For a value several writers edit - `push_subscriptions` (one entry per device), saved searches - which the
+ * page-life snapshot is wrong for: a tab open since before another device enrolled holds that device's
+ * absence, and writing that list back dropped it. The fresh read fixes the stale snapshot; the version fixes
+ * the window between this read and the write (another device saving in it gets a 409 here, and the edit is
+ * re-applied to what it saved, a few times at most). A read that FAILS is not "no row": nothing is written,
+ * because a list rebuilt from nothing is exactly the write that loses every other entry.
+ */
+export async function updatePref<T>(key: string, edit: (current: T | undefined) => T): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    let current: T | undefined;
+    let version: string | undefined;
+    try {
+      const row = await get<{ value?: unknown; etag?: string }>(`preferences/${key}`);
+      current = row?.value === undefined || row.value === null ? undefined : (row.value as T);
+      version = row?.etag;
+    } catch (e) {
+      if (!(e instanceof ApiError && e.status === 404)) throw e; // unreadable: refuse, never treat as empty
+    }
+    const next = edit(current);
+    try {
+      // No version means the read found no row, so the write may only create one.
+      await patch(`preferences/${key}`, { value: next }, version, version ? undefined : { headers: { "If-None-Match": "*" } });
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409 && attempt < 2) continue; // changed underneath: edit what won
+      throw e;
+    }
+    settled(key, next);
+    return next;
   }
 }
 
 /** Persist a preference and keep the shared snapshot in step. Fire-and-forget: a failed save is not fatal. */
 export function writePref(key: string, value: unknown): Promise<void> {
+  settled(key, value);
+  return patch(`preferences/${key}`, { value }, undefined, blindWrite()).then(
+    () => {},
+    () => {},
+  );
+}
+
+/** The local half of an immediate write: the snapshot, any deferred write for the key, and sibling tabs. */
+function settled(key: string, value: unknown) {
   apply(key, value);
   // An immediate write supersedes whatever a deferred one left armed for the same key. `flushPref` sends the
   // value CAPTURED when its timer was set, so a timer left running lands the OLDER value on top of this one,
-  // minutes later, with nothing on screen to say the save was undone. No key uses both paths today - which is
-  // precisely why the first one that does would not have this caught for it.
+  // minutes later, with nothing on screen to say the save was undone.
   const deferred = pending.get(key);
   if (deferred) {
     clearTimeout(deferred.timer);
@@ -101,10 +143,6 @@ export function writePref(key: string, value: unknown): Promise<void> {
   // A sibling tab of the same user holds its own snapshot. Hand it the new value directly rather than telling
   // it to re-read: we know exactly what changed, so a write costs no reads anywhere.
   publish(TOPIC_SET, { key, value } satisfies SetMsg);
-  return patch(`preferences/${key}`, { value }).then(
-    () => {},
-    () => {},
-  );
 }
 
 function apply(key: string, value: unknown) {
@@ -204,6 +242,9 @@ function saveUnconfirmed(map: Record<string, unknown>) {
 }
 
 function markUnconfirmed(key: string, value: unknown) {
+  // A value built while the snapshot is unknown is never re-sent by a later page life: that page would overlay
+  // it on the row it read successfully and PATCH it back unguarded (see `snapshotUnknown`).
+  if (snapshotUnknown) return;
   saveUnconfirmed({ ...readUnconfirmed(), [key]: value });
 }
 
@@ -236,7 +277,8 @@ function flushPref(key: string, unloading = false) {
   // silently undone - the next page load read the older server row and overwrote the local copy with it.
   // (Hide a dashboard card and reload straight away, and it came back.) Preference blobs are far inside the
   // 64KB keepalive budget.
-  void patch(`preferences/${key}`, { value: p.value }, undefined, unloading ? { keepalive: true } : undefined).then(
+  const blind = blindWrite();
+  void patch(`preferences/${key}`, { value: p.value }, undefined, unloading || blind ? { keepalive: unloading, ...blind } : undefined).then(
     () => clearUnconfirmed(key),
     () => {}, // left unconfirmed, so the next page life re-sends it rather than reading the older row back
   );

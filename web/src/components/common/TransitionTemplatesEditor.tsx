@@ -6,6 +6,7 @@ import { useCollection } from "@/hooks/useCollection";
 import { DEFAULT_TRANSITION_TEMPLATES, DOC_TYPES, type TemplateTask, type TransitionTemplate, type BgCheckType, type DocType } from "@/lib/transitions";
 import type { Employee } from "@/types";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { PanelSkeleton } from "@/components/common/Skeletons";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Field } from "@/components/common/Field";
@@ -66,6 +67,8 @@ export function TransitionTemplatesEditor() {
     }
   }
 
+  // No live inputs before the stored value lands: a change made on the defaults was replaced by the hydration.
+  if (!ready) return <PanelSkeleton />;
   return (
     <Card>
       <CardHeader>

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { IdCard, Paperclip, Download } from "lucide-react";
 import { IconEdit } from "@/components/common/IconEdit";
+import { DetailSkeleton } from "@/components/common/Skeletons";
 import { get, patch, upload, download } from "@/api";
 import { isConflict } from "@/lib/formError";
 import type { IdentityDetails } from "@/types";
@@ -28,11 +29,15 @@ export function EmployeeIdentityDetails({ employeeId, canEdit, title = "Identity
   const docTarget = useRef<string | null>(null);
 
   // The loader is the effect's dependency (see the note in EmployeeBankDetails).
+  // A failed read is shown as one, not as "no identity fields configured".
+  const [loadFailed, setLoadFailed] = useState(false);
   const load = useCallback(async () => {
+    setLoadFailed(false);
     try {
       setData(await get<IdentityDetails>(`employees/${employeeId}/identity`));
     } catch (e) {
       if ((e as { status?: number }).status === 403) setDenied(true);
+      else setLoadFailed(true);
     }
   }, [employeeId]);
   useEffect(() => {
@@ -101,7 +106,14 @@ export function EmployeeIdentityDetails({ employeeId, canEdit, title = "Identity
       </CardHeader>
       <CardContent>
         <input ref={fileRef} type="file" className="hidden" onChange={onDocPicked} />
-        {fields.length === 0 ? (
+        {!data && loadFailed ? (
+          <div className="flex items-center justify-center gap-3 py-4">
+            <p className="text-sm text-muted-foreground">Couldn't load the identity details just now.</p>
+            <Button size="sm" variant="outline" onClick={load}>Try again</Button>
+          </div>
+        ) : !data ? (
+          <DetailSkeleton rows={3} />
+        ) : fields.length === 0 ? (
           <p className="py-4 text-center text-sm text-muted-foreground">No identity fields configured. Add them in Settings.</p>
         ) : (
           <dl className="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2">

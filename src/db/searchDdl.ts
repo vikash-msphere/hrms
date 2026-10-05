@@ -18,6 +18,15 @@
 // WHY TRIGGERS. The index must be correct for every write - services, cron, automations, seeds and manual
 // SQL alike. A trigger is the only place that sees all of them, so no service is touched and nothing can be
 // forgotten. `search_fts.rowid` is kept equal to the `search_docs` rowid, so a match joins straight across.
+//
+// WHAT A WRITE COSTS. D1 bills rows WRITTEN, and an FTS5 row is not one row: it writes its content, its size,
+// a new index segment, and every few inserts a merge that rewrites segments - with `prefix='2 3'` on top. So:
+//   - A doc with no words (an attendance punch with no note) gets NO FTS row. Every doc has its `search_docs`
+//     row, which is what `in:` and the filters list; only a typed word needs the FTS row, and no word reaches
+//     an empty one anyway.
+//   - The update trigger fires only when a column it reads changed (`WHEN`), and rewrites the FTS row only
+//     when a matched column did. Clocking out, a status flip, a soft delete: none of them touches the
+//     keyword text, so none of them pays for it.
 import { getTableConfig } from "drizzle-orm/sqlite-core";
 import { SEARCH_INDEX, type SearchEntry } from "../domain/searchIndex";
 import type { StateRule } from "../domain/manifests";
@@ -84,6 +93,9 @@ function deletedExpr(entry: SearchEntry, prefix: string): string {
 // like `o'brien` produce a working index instead of a syntax error at migration time.
 const sqlStr = (v: string) => `'${v.replace(/'/g, "''")}'`;
 
+// A manifest field (`snake_case`) as the Drizzle property it names.
+const propOf = (field: string) => field.replace(/_([a-z])/g, (_m, ch: string) => ch.toUpperCase());
+
 function restrictedExpr(entry: SearchEntry, prefix: string, sv: StateVisibility): string {
   const rule = sv[entry.collection];
   if (!rule) return "0";
@@ -91,7 +103,7 @@ function restrictedExpr(entry: SearchEntry, prefix: string, sv: StateVisibility)
   // coalesce keeps a NULL column from making the whole expression NULL, which a NOT NULL column would reject.
   const clauses = Object.entries(rule.public_when)
     .map(([field, want]) => {
-      const c = col(entry.table, field.replace(/_([a-z])/g, (_m, ch: string) => ch.toUpperCase()));
+      const c = col(entry.table, propOf(field));
       if (!c) return null;
       const q = qualify(prefix, c);
       // A boolean clause keeps the original numeric form (SQLite stores them as 0/1). A STRING clause compares
@@ -123,11 +135,38 @@ function createdExpr(entry: SearchEntry, prefix: string): string {
   return c ? qualify(prefix, c) : "NULL";
 }
 
+// "Did any of these properties' columns change", as `old."a" IS NOT new."a" OR ...`. IS NOT, so a NULL on one side
+// compares as a value instead of making the whole test NULL (which a trigger's WHEN reads as false).
+function changedExpr(table: any, props: string[]): string {
+  const cols = [...new Set(props.map((p) => col(table, p)).filter(Boolean) as string[])];
+  return cols.length === 0 ? "0" : cols.map((c) => `${qualify("old.", c)} IS NOT ${qualify("new.", c)}`).join(" OR ");
+}
+
+// Every property the doc and its FTS text are built from: an update that changes none of them leaves the index
+// exactly as it was, so the update trigger does not fire for it.
+function readProps(entry: SearchEntry, sv: StateVisibility): string[] {
+  return [
+    "code",
+    ...(entry.scoping.kind === "flat" ? [] : [entry.scoping.owner]),
+    ...(entry.title ?? []),
+    ...(entry.subtitle ?? []),
+    ...entry.match,
+    "deleteTime",
+    "heldAt",
+    ...Object.keys(sv[entry.collection]?.public_when ?? {}).map(propOf),
+  ];
+}
+
+// Writes `text` into the FTS row `rowidExpr` only when it has a word in it: a doc with no words has no FTS row.
+const ftsInsert = (rowidExpr: string, text: string, also = "") =>
+  `INSERT INTO "search_fts" ("rowid", "text") SELECT ${rowidExpr}, "text" FROM (SELECT ${text} AS "text") WHERE trim("text") <> ''${also}`;
+
 function triggersFor(entry: SearchEntry, sv: StateVisibility): string[] {
   const table = getTableConfig(entry.table).name;
   const slug = entry.collection.replace(/-/g, "_");
   const idCol = col(entry.table, "uuid")!;
   const codeCol = col(entry.table, "code");
+  const matchChanged = changedExpr(entry.table, entry.match);
 
   const values = (prefix: string) =>
     [
@@ -148,13 +187,17 @@ function triggersFor(entry: SearchEntry, sv: StateVisibility): string[] {
   return [
     `CREATE TRIGGER "search_ai_${slug}" AFTER INSERT ON "${table}" BEGIN
   INSERT INTO "search_docs" (${DOC_COLS}) VALUES (${values("new.")});
-  INSERT INTO "search_fts" ("rowid", "text") VALUES (last_insert_rowid(), ${body("new.")});
+  ${ftsInsert("last_insert_rowid()", body("new."))};
 END`,
     // An update rewrites the doc in place. INSERT OR REPLACE is avoided so the rowid - and therefore the FTS
-    // row it is joined to - survives the edit.
-    `CREATE TRIGGER "search_au_${slug}" AFTER UPDATE ON "${table}" BEGIN
+    // row it is joined to - survives the edit. The FTS row is replaced (FTS5 runs an UPDATE as exactly this
+    // delete + insert) rather than updated, because it may not exist yet: a doc that gains its first words
+    // gets one, and one that loses them has it removed.
+    `CREATE TRIGGER "search_au_${slug}" AFTER UPDATE ON "${table}"
+WHEN ${changedExpr(entry.table, readProps(entry, sv))} BEGIN
   UPDATE "search_docs" SET "code" = ${codeCol ? qualify("new.", codeCol) : "NULL"}, "owner_id" = ${ownerExpr(entry, "new.")}, "title" = ${titleExpr(entry, "new.")}, "subtitle" = ${firstNonEmpty(entry.table, entry.subtitle, "new.")}, "deleted" = ${deletedExpr(entry, "new.")}, "restricted" = ${restrictedExpr(entry, "new.", sv)} WHERE "collection" = '${entry.collection}' AND "record_id" = ${qualify("new.", idCol)};
-  UPDATE "search_fts" SET "text" = ${body("new.")} WHERE "rowid" = (${locate(qualify("new.", idCol))});
+  DELETE FROM "search_fts" WHERE "rowid" = (${locate(qualify("new.", idCol))}) AND (${matchChanged});
+  ${ftsInsert(`(${locate(qualify("new.", idCol))})`, body("new."), ` AND (${matchChanged})`)};
 END`,
     `CREATE TRIGGER "search_ad_${slug}" AFTER DELETE ON "${table}" BEGIN
   DELETE FROM "search_fts" WHERE "rowid" = (${locate(qualify("old.", idCol))});
@@ -182,7 +225,7 @@ function backfillFor(entry: SearchEntry, sv: StateVisibility): string[] {
   ].join(", ");
   return [
     `INSERT INTO "search_docs" (${DOC_COLS}) SELECT ${select} FROM "${table}" t`,
-    `INSERT INTO "search_fts" ("rowid", "text") SELECT d."rowid", ${joined(entry.table, entry.match, "t.")} FROM "search_docs" d JOIN "${table}" t ON t."${idCol}" = d."record_id" WHERE d."collection" = '${entry.collection}' AND d."rowid" NOT IN (SELECT "rowid" FROM "search_fts")`,
+    `INSERT INTO "search_fts" ("rowid", "text") SELECT d."rowid", ${joined(entry.table, entry.match, "t.")} FROM "search_docs" d JOIN "${table}" t ON t."${idCol}" = d."record_id" WHERE d."collection" = '${entry.collection}' AND d."rowid" NOT IN (SELECT "rowid" FROM "search_fts") AND trim(${joined(entry.table, entry.match, "t.")}) <> ''`,
   ];
 }
 
@@ -211,7 +254,7 @@ export const SEARCH_DDL_MARKER = "-- Global search index. GENERATED from src/dom
 // triggers do the migrations leave in place, which does the registry want, and what must the newest migration
 // carry to close the gap.
 
-const TRIGGER_STATEMENT = /DROP TRIGGER (?:IF EXISTS )?"(search_a[iud]_[a-z0-9_]+)"|CREATE TRIGGER "(search_a[iud]_[a-z0-9_]+)" AFTER (?:INSERT|UPDATE|DELETE) ON "[^"]+" BEGIN\n[\s\S]*?\nEND/g;
+const TRIGGER_STATEMENT = /DROP TRIGGER (?:IF EXISTS )?"(search_a[iud]_[a-z0-9_]+)"|CREATE TRIGGER "(search_a[iud]_[a-z0-9_]+)" AFTER (?:INSERT|UPDATE|DELETE) ON "[^"]+"(?:\nWHEN [^\n]*)? BEGIN\n[\s\S]*?\nEND/g;
 
 function applyTriggerStatements(into: Map<string, string>, sql: string): Map<string, string> {
   for (const m of sql.matchAll(TRIGGER_STATEMENT)) {

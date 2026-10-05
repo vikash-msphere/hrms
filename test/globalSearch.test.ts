@@ -33,7 +33,7 @@ beforeAll(async () => {
   deps = makeDeps(b);
 });
 
-const TABLES = [schema.cards, schema.boards, schema.assets, schema.accessRules, schema.reviews, schema.reviewCycles, schema.leaveRequests, schema.leaveTypes, schema.holidays, schema.announcements, schema.tickets, schema.users, schema.employees, schema.departments, schema.roles];
+const TABLES = [schema.attendanceSessions, schema.cards, schema.boards, schema.assets, schema.accessRules, schema.reviews, schema.reviewCycles, schema.leaveRequests, schema.leaveTypes, schema.holidays, schema.announcements, schema.tickets, schema.users, schema.employees, schema.departments, schema.roles];
 beforeEach(async () => {
   for (const t of TABLES) await deps.db.delete(t); // the delete triggers clear the index with them
 });
@@ -192,6 +192,37 @@ describe("global search", () => {
     expect(await search(admin, "diwali")).toEqual([]);
     const orphans = await deps.db.select().from(schema.searchDocs).where(eq(schema.searchDocs.collection, "holidays"));
     expect(orphans).toEqual([]);
+  });
+
+  it("gives a record with no words no keyword row, and an edit search does not read no index write", async () => {
+    // A clock-in has no note, so nothing a person types can reach it: it gets its doc (`in:` lists it) and no
+    // FTS row, which is most of what a punch used to cost in D1 rows written.
+    const admin = await seedPerson("04-z01", "Root", "Admin", ADMIN_GRANT, "super_admin");
+    const id = genId();
+    await deps.db.insert(schema.attendanceSessions).values({
+      uuid: id, code: "04-z01-at1", employeeId: admin.employeeId!, clockIn: new Date("2026-03-04T09:00:00Z"), source: "clock",
+    });
+    const ftsRows = async () => (await b.DB.prepare(
+      `select count(*) as n from "search_fts" where "rowid" = (select "rowid" from "search_docs" where "collection" = 'attendance' and "record_id" = ?)`,
+    ).bind(id).first<{ n: number }>())!.n;
+    const doc = () => deps.db.select().from(schema.searchDocs).where(eq(schema.searchDocs.recordId, id)).get();
+    expect(await doc()).toBeDefined();
+    expect(await ftsRows()).toBe(0);
+    expect(kinds(await search(admin, "clock"))).not.toContain("attendance");
+
+    // Clocking out changes nothing the index reads, so the update trigger does not fire: a doc value planted
+    // by hand survives it.
+    await b.DB.prepare(`update "search_docs" set "subtitle" = 'planted' where "record_id" = ?`).bind(id).run();
+    await deps.db.update(schema.attendanceSessions).set({ clockOut: new Date("2026-03-04T17:00:00Z") }).where(eq(schema.attendanceSessions.uuid, id));
+    expect((await doc())!.subtitle).toBe("planted");
+
+    // Gaining words gives it a keyword row; losing them takes it away again.
+    await deps.db.update(schema.attendanceSessions).set({ note: "Forgot my badge" }).where(eq(schema.attendanceSessions.uuid, id));
+    expect((await search(admin, "badge")).map((h) => h.title)).toEqual(["Forgot my badge"]);
+    expect(await ftsRows()).toBe(1);
+    await deps.db.update(schema.attendanceSessions).set({ note: null }).where(eq(schema.attendanceSessions.uuid, id));
+    expect(await search(admin, "badge")).toEqual([]);
+    expect(await ftsRows()).toBe(0);
   });
 
   it("reads a bounded number of rows regardless of how much data exists", async () => {

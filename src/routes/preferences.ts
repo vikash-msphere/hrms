@@ -19,6 +19,8 @@ export const preferences = new Hono<AppEnv>()
     return c.json(toPreferenceResource(row));
   })
   .patch("/:preference_id", zValidator("json", writeSchema), async (c) => {
-    const row = await upsertPreference(c.get("deps"), c.get("user"), c.req.param("preference_id"), c.req.valid("json").value);
+    // Both validators optional, as on settings: `If-Match` for a value built on a read, `If-None-Match: *` for a
+    // caller that read no row (services/preferences.ts#upsertPreference).
+    const row = await upsertPreference(c.get("deps"), c.get("user"), c.req.param("preference_id"), c.req.valid("json").value, c.req.header("If-Match"), c.req.header("If-None-Match"));
     return c.json(toPreferenceResource(row));
   });

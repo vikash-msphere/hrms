@@ -23,8 +23,8 @@ Written 2026-10-04. Items are ordered by value for the effort, not by dependency
 - **Category chips.** All · People · Pages · Time · Work · Docs · Money · Hiring · Support, fixed order, only
   the ones the caller can search, greyed at zero, counted against the unscoped answer. A record category
   narrows the SERVER request (`in=` its tone's collections; the route takes up to 64). A typed `in:` wins.
-- **Filters menu.** Whose (Anyone / Mine / My team), Created (any / 7 / 30 days / 12 months), Order (best match
-  / newest first), and the full filter-word guide.
+- **Filter bar** under the results (item 7): filters for the typed words, every filter as a key with an
+  in-place picker, Newest first, and `?` for the filter-word guide. Every press writes a filter word into the box.
 - **Completion chips.** While the caret is in a filter word the chip row becomes what can come after it - kinds
   after `in:`, statuses after `status:`, people after `@` - in plain words. Tab / Enter take the lit one, → and
   ← walk them, ↓ goes to the list. The half-typed word is left out of the search, so the list stays useful.
@@ -48,8 +48,8 @@ Written 2026-10-04. Items are ordered by value for the effort, not by dependency
   A row with no title, such as an attendance punch without a note, is listed by filters but found by no word.
   Raw row count is the weakest signal: the kinds that pile up rows (punches, seeded workflows) are the least
   searched. Suggestions write a kind under its shown name (`in:tasks`, not `in:cards`; `inWordOf`).
-- **Pills.** Every filter in force - typed or from the menu - as a pill that says what it means, with × and
-  Clear all. Removing a typed one edits the box.
+- **Pills.** Every filter word in the box - typed, or written there by the filter bar - as a pill that says what
+  it means, with × and Clear all. Removing one edits the box.
 - **No dead ends.** Narrowed to nothing, the list offers `Search everything for "…"`, saying what it lets go.
 - **Small things.** ↑ in the empty box recalls the last search; ⌘/Ctrl-click and middle-click open a result in a
   new tab; "Clear recent searches"; chip rows fade at an edge with more out of view.
@@ -137,15 +137,17 @@ row's right edge, not nested buttons.
 
 ## 4. Saved searches - DONE 2026-10-04
 
-Built: web/src/lib/savedSearches.ts (`useSavedSearches`) + `SavedChip` / `NameSearch` / the Filters menu's
-"Save this search…" in CommandPalette.tsx. Stored as `{ searches: [...] }` under `preferences/saved_searches` - a
+Built: web/src/lib/savedSearches.ts (`useSavedSearches`) + `SavedChip` / `NameSearch` / the chip row's "Save this
+search" button in CommandPalette.tsx. Stored as `{ searches: [...] }` under `preferences/saved_searches` - a
 preference value is an object by contract (openapi.yaml), as `push_subscriptions` wraps its `subs`. Every change
 re-reads the stored list first (`refetchPref`) and writes it back whole. Naming and renaming happen in a field
-that takes the chip row's place, pre-filled with the search's own pills and words; removing asks first. e2e:
-search.spec.ts "a search saved by name comes back from its chip...".
+that takes the chip row's place, pre-filled with the search's own pills and words; removing asks first. A stored
+search also carries `refine` (an owner, a window, an order): older saves filled it in, new ones leave it empty,
+since those are filter words in the box now; running one turns any it holds into words (`refineAsWords`). e2e:
+search.spec.ts "a saved search waits in the Saved menu...".
 
-**What it does.** "Save this search" (the words, the category, the menu filters) as a named chip at the front of
-the chip row - "My pending leave", "Open IT tickets" - one press to run again, from any device.
+**What it does.** "Save this search" (the words and the category) as a named chip at the front of the chip row -
+"My pending leave", "Open IT tickets" - one press to run again, from any device.
 
 **How.** Stored in the caller's `preferences` row (the same per-person, cross-device store as theme and nav, see
 cross-device-prefs); a small cap (8); rename and remove from the chip's own menu. No sharing in the first cut.
@@ -169,11 +171,56 @@ the route sends it as `create_time` (openapi.yaml updated); the palette buckets 
 `whenLabel` (Today / Yesterday / This week / This month / Earlier, and "Date unknown" for an index row with no
 creation time) by the org-local day. e2e: search.spec.ts "newest first, the records group by when...".
 
-**What it does.** With Order: Newest first, records group under Today / This week / This month / Earlier rather
-than by kind - the order already says time matters more than type.
+**What it does.** Newest first (`sort:new`, typed or the filter bar's toggle), records group under Today / This
+week / This month / Earlier rather than by kind - the order already says time matters more than type.
 
 **How.** Hits carry `created_at` (add it to the search response if absent - an index column, no extra read);
 bucket by the org-local day (lib/orgDay), never a UTC slice.
+
+## 7. The filter bar - DONE 2026-10-05
+
+Built: `FilterBar` in CommandPalette.tsx, in both shells, in place of the hint strip; the choices, picks and word
+offers are pure functions in web/src/lib/paletteQuery.ts (`facetOf`, `facetOffers`, `applyFacetPick`,
+`whenPresets` / `whenCounts`, `filtersForWords`, `handleFor`), unit-tested in test/paletteQuery.test.ts. The
+Filters menu is gone: its owner, window and order are the bar's Who, When and Newest first, written into the box.
+"Save this search" is a bookmark button in the chip row; a picker waits in `ChipsSkeleton`
+(components/common/Skeletons.tsx). In the modal, Esc no longer closes the search while it has a step to go back
+from (a picker, a record's actions): the dialog hears Esc first, so `onEscapeKeyDown` leaves it to the box. e2e:
+search.spec.ts "the filter bar writes whose and when...", "a word that names a filter...", "the Kind picker...",
+"Who hands over to typing...", and phone.spec.ts "the search's filter bar sits at the foot...".
+
+**Problem.** The strip under the results was static text - `in:tickets · @name · is:mine · dept:sales ·
+after:7d` - naming half the filter words, doing nothing when pressed, and hidden on a phone, where typing syntax is
+hardest. The filters lived in three other places (a Filters menu holding hidden state, the completion chips, the
+`?` guide), and somebody who did not know the words had no help narrowing a long list.
+
+**What it does.** One bar, three parts, every press a real filter word written into the box - so the box stays the
+one record of what is searched, and shows the word that would have done it:
+- **Filter by.** The filters the plain words name: `pending` is Status: Pending, `leave` the leave kinds, `priya`
+  Priya Shah, `my` Mine and `my team` My team, `september` the latest September, `this year`, `2025`, `newest`.
+  Taking one puts it in the words' place. Exact names only, never a prefix (`lea` and `pend` offer nothing); a key
+  the box already sets offers nothing more; statuses are the kinds in play's (typed `in:`, else the category's).
+  Above the keys, so the keys never move as offers come and go. At most three, in the order typed.
+- **The keys,** in plain words: Kind · Who · Department · Status · When, each counting its filters on, then Newest
+  first (a toggle) and `?`. Hidden where they cannot narrow (Department for a caller who may not list departments,
+  Status once the vocabulary says the kinds in play have none), but kept while one of their filters is on; the
+  whole row hides under Pages, in a `?` box and while a record's actions show.
+- **A key's picker,** in the keys' place: Kind (every kind, ranked and counted as the `in:` completions are, the
+  ones on first), Who (Me, My team, your direct reports, anybody named), Department, Status, When (Today,
+  Yesterday, Last 7 / 30 days, This / Last month, This year, Before this year - counted from the loaded results
+  while no date filter is on). Choices already in the box are pressed, and pressing one again takes it out. A key
+  holding one value swaps its word and closes; `in:` and every `-` form add up and stay open. Keep / Leave out
+  writes the `-` form. The long lists end in a choice that writes the key into the box ("Find a kind…",
+  "Someone else…", "Find a department…"), where its completions narrow as letters are typed - and a bare `@` now
+  completes to you, your team and your reports before a letter is typed.
+
+On a phone the bar is the modal's last row, just above the on-screen keyboard. Keyboard hints ride at the end of
+the row from `sm`. A press from a pointer leaves the focus in the box; one from the keyboard (`detail` 0) keeps it in
+the bar, on the next thing to press.
+
+**How.** The vocabulary is read the first time the box holds a word of three letters (it may name a status or a
+kind), `in:` / `status:` is typed or the Kind / Status picker opens; `/search:counts` when the Kind picker opens;
+departments when the Department picker opens - each once per page life, as before. No new endpoint, no server change.
 
 ---
 

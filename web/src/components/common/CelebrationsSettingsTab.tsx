@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { AccessAction } from "@/components/access/AccessAction";
 import { useToast } from "@/components/ui/use-toast";
 import { useUnsaved } from "@/components/common/UnsavedChanges";
+import { PanelSkeleton } from "@/components/common/Skeletons";
 import { getSetting, saveSetting } from "@/lib/settingsStore";
 
 // The Celebrations tab of the Dashboard settings panel (pages/Settings.tsx#DashboardTab): how far ahead
@@ -54,6 +55,8 @@ export function CelebrationsSettingsTab() {
     }
   }
 
+  // No live inputs before the stored value lands: a change made on the defaults was replaced by the hydration.
+  if (!ready) return <PanelSkeleton />;
   return (
     <div className="space-y-3">
       <label className="block max-w-xs space-y-1">

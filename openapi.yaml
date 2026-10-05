@@ -5368,7 +5368,11 @@ paths:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/preference' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     patch:
-      description: Update method for preference. Upserts the caller's value for this key.
+      description: >-
+        Update method for preference. Upserts the caller's value for this key, rewriting all of it. A caller
+        whose value is built on a read sends `If-Match` with the `etag` it read, and the save is refused with
+        409 if the value has changed since. A caller that read no value sends `If-None-Match: *`, and its save
+        is refused with 409 if the value exists. Omit both headers for last-write-wins.
       operationId: UpdatePreference
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/preference' } } } }
       responses:

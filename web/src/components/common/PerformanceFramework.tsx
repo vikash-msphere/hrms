@@ -3,6 +3,7 @@ import { Plus, Trash2, Save } from "lucide-react";
 import { get } from "@/api";
 import { DEFAULT_PERFORMANCE, type Competency, type RatingLevel } from "@/lib/performance";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { PanelSkeleton } from "@/components/common/Skeletons";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -73,6 +74,8 @@ export function PerformanceFramework() {
     }
   }
 
+  // No live inputs before the stored value lands: a change made on the defaults was replaced by the hydration.
+  if (!ready) return <PanelSkeleton />;
   return (
     <Card>
       <CardHeader>

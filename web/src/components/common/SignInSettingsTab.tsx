@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { LogIn } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { PanelSkeleton } from "@/components/common/Skeletons";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -73,6 +74,8 @@ export function SignInSettingsTab() {
     }
   }
 
+  // No live inputs before the stored value lands: a change made on the defaults was replaced by the hydration.
+  if (!ready) return <PanelSkeleton />;
   return (
     <Card>
       <CardHeader>
