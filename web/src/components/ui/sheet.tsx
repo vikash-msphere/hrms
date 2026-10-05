@@ -49,8 +49,10 @@ const SheetOverlay = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <DialogPrimitive.Overlay
     ref={ref}
+    // Exits AFTER the panel (400ms against SheetContent's 300), so a sheet reopened mid-exit never gets its
+    // backdrop portaled over it - see DialogOverlay in ui/dialog.tsx.
     className={cn(
-      "fixed inset-0 z-50 bg-overlay backdrop-blur-sm data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
+      "fixed inset-0 z-50 bg-overlay backdrop-blur-sm data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:duration-[400ms] data-[state=open]:fade-in-0",
       className,
     )}
     {...props}

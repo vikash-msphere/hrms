@@ -2,7 +2,7 @@
 /// <reference types="@cloudflare/vitest-pool-workers" />
 import { env } from "cloudflare:test";
 import { describe, it, expect, beforeAll, beforeEach } from "vitest";
-import { and, count, eq } from "drizzle-orm";
+import { and, count, eq, isNotNull } from "drizzle-orm";
 const migrationModules = import.meta.glob("../src/db/migrations/*.sql", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
 const migrationSql = Object.keys(migrationModules).sort().map((k) => migrationModules[k]).join("\n");
 import * as schema from "../src/db/schema";
@@ -14,8 +14,8 @@ import { applyScope } from "../src/services/listScope";
 import { searchKindCounts } from "../src/services/globalSearch";
 
 // The `in:` suggestions' totals (services/globalSearch.ts searchKindCounts) come from `search_counts`, the index
-// pre-counted by triggers (migration 0010) - so they are only right if (a) the triggers keep the counters in step
-// with `search_docs`, and (b) the scope predicate bound to the counters answers exactly what it answers bound to
+// pre-counted by triggers (migrations 0010, 0011) - so they are only right if (a) the triggers keep the counters in
+// step with the TITLED `search_docs` rows (what words can find), and (b) the scope predicate bound to the counters answers exactly what it answers bound to
 // `search_docs`. The oracle for both is the expensive way: count `search_docs` itself under the same scope.
 const KEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 let deps: Deps;
@@ -46,20 +46,21 @@ async function person(code: string): Promise<string> {
   await deps.db.insert(schema.employees).values({ uuid, code, firstName: "P", lastName: code, workEmail: `${code}@test.example`, status: "active" });
   return uuid;
 }
-async function leave(employeeId: string, code: string): Promise<string> {
+// A leave request's index title is its reason, so `reason: null` makes a row no word can find.
+async function leave(employeeId: string, code: string, reason: string | null = "x"): Promise<string> {
   const leaveTypeId = genId();
   await deps.db.insert(schema.leaveTypes).values({ uuid: leaveTypeId, code: `lt-${leaveTypeId.slice(0, 4)}`, name: "Casual" });
   const uuid = genId();
   await deps.db.insert(schema.leaveRequests).values({
-    uuid, code, employeeId, leaveTypeId, startDate: new Date("2026-01-01"), endDate: new Date("2026-01-02"), days: 1, state: "PENDING", reason: "x",
+    uuid, code, employeeId, leaveTypeId, startDate: new Date("2026-01-01"), endDate: new Date("2026-01-02"), days: 1, state: "PENDING", reason,
   });
   return uuid;
 }
 
-/** The expensive answer: `search_docs` counted directly under the same scope. */
+/** The expensive answer: the titled `search_docs` rows counted directly under the same scope. */
 async function oracle(collection: string, scope: ListScope): Promise<number> {
   const [row] = await deps.db.select({ n: count() }).from(docs).where(and(
-    eq(docs.collection, collection), eq(docs.deleted, false),
+    eq(docs.collection, collection), eq(docs.deleted, false), isNotNull(docs.title),
     applyScope(scope, docs.code, docs.ownerId),
     scope.seeRestricted ? undefined : eq(docs.restricted, false),
   ));
@@ -107,6 +108,29 @@ describe("searchKindCounts", () => {
     expect(await counted("leave-requests", all)).toBe(2);
     await deps.db.delete(schema.leaveRequests).where(eq(schema.leaveRequests.uuid, first));
     expect(await counted("leave-requests", all)).toBe(1);
+  });
+
+  it("counts only the rows words can find: a row without a title is left out until it gets one", async () => {
+    const alice = await person("04-a01");
+    const bare = await leave(alice, "04-a01-001", null);
+    await leave(alice, "04-a01-002", "   "); // blank is no title either (the index stores it as NULL)
+    await leave(alice, "04-a01-003");
+    expect(await counted("leave-requests", all)).toBe(1);
+    expect(await counted("leave-requests", all)).toBe(await oracle("leave-requests", all));
+
+    // A reason written in: now findable, so counted. Edited: still one. Cleared: gone again.
+    await deps.db.update(schema.leaveRequests).set({ reason: "family wedding" }).where(eq(schema.leaveRequests.uuid, bare));
+    expect(await counted("leave-requests", all)).toBe(2);
+    await deps.db.update(schema.leaveRequests).set({ reason: "cousin's wedding" }).where(eq(schema.leaveRequests.uuid, bare));
+    expect(await counted("leave-requests", all)).toBe(2);
+    await deps.db.update(schema.leaveRequests).set({ reason: null }).where(eq(schema.leaveRequests.uuid, bare));
+    expect(await counted("leave-requests", all)).toBe(1);
+
+    // An untitled row soft-deleted and deleted moves nothing; it was never counted.
+    await deps.db.update(docs).set({ deleted: true }).where(eq(docs.recordId, bare));
+    await deps.db.delete(schema.leaveRequests).where(eq(schema.leaveRequests.uuid, bare));
+    expect(await counted("leave-requests", all)).toBe(1);
+    expect(await counted("leave-requests", all)).toBe(await oracle("leave-requests", all));
   });
 
   it("leaves out a kind whose scope names single records, rather than counting past what may be seen", async () => {

@@ -256,8 +256,9 @@ function scopePredicate(
 }
 
 /**
- * How many records of each kind this caller can search - the totals the palette shows on its `in:` suggestions,
- * biggest first. ONE grouped read of `search_counts` (src/db/schema.ts), the index pre-counted by everything
+ * How many records of each kind this caller can find by words (a titled index row) - the totals the palette shows
+ * on its `in:` suggestions, and one of the things it ranks them by (web/src/lib/paletteQuery.ts rankKindOffers).
+ * ONE grouped read of `search_counts` (src/db/schema.ts), the index pre-counted by everything
  * visibility tests, under the SAME scope predicates the search binds over `search_docs`: a few rows per kind
  * per owner, where counting `search_docs` itself would read every row the caller can see (no index serves the
  * scope test there).

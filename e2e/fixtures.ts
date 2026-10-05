@@ -393,13 +393,14 @@ export async function apiPost(page: Page, path: string, data: unknown): Promise<
  * `page.reload()` waits out a closed dialog's history drop first.
  *
  * A dialog pushes a history entry while it is open and, once it has closed, steps off it with an async
- * `history.back()` (web/src/lib/dialogHistory.ts). A reload issued in that window races the traversal: either
- * the reload is aborted (`net::ERR_ABORTED; maybe frame was detached?`) or the back lands on the NEW page and
- * closes whatever dialog opens there. Nobody presses reload inside those milliseconds; specs do, right after
- * a dialog closes, and with production-like latency (E2E_API_LATENCY_MS) the window is wide enough to
- * hit. "Pending" is a dialog entry on top with no dialog left on screen - a reload made deliberately WITH a
- * dialog open (a record deep link that should land back on it) is not held up. Bounded: a drop that never
- * comes is the app's problem to show, not this helper's to hang on.
+ * `history.back()` (web/src/lib/dialogHistory.ts). The app skips that step once a reload has begun, but a
+ * reload issued after the step has started races the traversal, and the back lands on the NEW page and closes
+ * whatever dialog opens there. Specs reload right after a dialog closes, and with production-like latency
+ * (E2E_API_LATENCY_MS) the window is wide enough to hit. "Pending" is a dialog entry on top with no dialog
+ * OPEN on screen - one still playing its exit animation (`data-state="closed"`) has not dropped its entry yet,
+ * so it counts as closed. A reload made deliberately WITH a dialog open (a record deep link that should land
+ * back on it) is not held up. Bounded: a drop that never comes is the app's problem to show, not this
+ * helper's to hang on.
  */
 function settleBeforeReload(page: Page) {
   const reload = page.reload.bind(page);
@@ -408,7 +409,7 @@ function settleBeforeReload(page: Page) {
       .waitForFunction(
         () =>
           (history.state as { hrmsDialog?: boolean } | null)?.hrmsDialog !== true ||
-          !!document.querySelector('[role="dialog"], [role="alertdialog"]'),
+          !!document.querySelector('[role="dialog"][data-state="open"], [role="alertdialog"][data-state="open"]'),
         undefined,
         { timeout: 10_000 },
       )

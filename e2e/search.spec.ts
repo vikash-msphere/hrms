@@ -1,4 +1,4 @@
-import { SPA_HEADERS, fileLeave, gotoRoute, patchSettings, purge, searchBox, searchPanel, searchRecordRead, test, expect, toast } from "./fixtures";
+import { SPA_HEADERS, fileLeave, gotoRoute, makeThrowawayPerson, patchSettings, purge, retireThrowawayPerson, searchBox, searchPanel, searchRecordRead, test, expect, toast } from "./fixtures";
 
 // ⌘K: the only way into a lot of this app.
 //
@@ -545,7 +545,57 @@ test.describe("global search", () => {
     await expect(searchPanel(page).getByRole("button", { name: "Remove filter: Leave requests" }).locator("..")).not.toHaveAttribute("title", /./);
   });
 
-  test("the kinds after in: come biggest first, each with its count", async ({ as }) => {
+  test("the kinds after in: come ranked: somebody's records before catalogs, then what this person picks, then the page", async ({ as }) => {
+    // A throwaway person: picking a kind is remembered in their own preferences row, which must not be a
+    // seeded login's that another worker is ranking with at the same moment.
+    const admin = await as("super");
+    const person = await makeThrowawayPerson(admin, "Kinds");
+    try {
+      const page = await as({ email: person.email });
+      await gotoRoute(page, "dashboard");
+      const search = searchBox(page);
+      const kinds = page.getByRole("listbox", { name: "Kind suggestions" }).getByRole("option");
+      // A chip's name is its label, then its count when it has one ("Tickets 3").
+      const names = async () => (await kinds.allTextContents()).map((t) => t.trim().replace(/\s+[\d,]+\+?$/, ""));
+      const openIn = async () => {
+        await page.keyboard.press("ControlOrMeta+k");
+        await search.fill("in:");
+        await expect(kinds.first()).toBeVisible();
+      };
+
+      // A bare `in:` on a page that shows no kind: the person's records (their tickets and leave, the
+      // directory) before the org's catalogs (holidays) and their own inbox (notifications), however many
+      // rows those hold.
+      const totals = page.waitForResponse((r) => new URL(r.url()).pathname === "/v1/search:counts");
+      await openIn();
+      expect((await totals).status()).toBe(200);
+      const bare = await names();
+      const at = (label: string) => {
+        expect(bare, label).toContain(label);
+        return bare.indexOf(label);
+      };
+      for (const record of ["Tickets", "Leave requests", "Employees"]) {
+        for (const reference of ["Holidays", "Notifications"]) expect(at(record), `${record} before ${reference}`).toBeLessThan(at(reference));
+      }
+
+      // Picking a kind is remembered: next time it comes first, catalog or not.
+      await kinds.filter({ hasText: /^Holidays(\s|$)/ }).click();
+      await expect(search).toHaveValue("in:holidays ");
+      await page.keyboard.press("Escape");
+      await openIn();
+      await expect(kinds.first()).toHaveText(/^Holidays(\s+[\d,]+)?$/);
+
+      // The page the search is opened from comes before even that.
+      await page.keyboard.press("Escape");
+      await gotoRoute(page, "tickets");
+      await openIn();
+      await expect(kinds.first()).toHaveText(/^Tickets(\s+[\d,]+)?$/);
+    } finally {
+      await retireThrowawayPerson(admin, person.path);
+    }
+  });
+
+  test("with words, the kinds after in: lead with where those words' results are, each with its count", async ({ as }) => {
     const page = await as("super");
     await gotoRoute(page, "dashboard");
     await page.keyboard.press("ControlOrMeta+k");
@@ -554,20 +604,14 @@ test.describe("global search", () => {
     const countsOf = async () =>
       (await kinds.allTextContents()).map((t) => /([\d,]+)\+?$/.exec(t.trim())?.[1]).filter((n): n is string => !!n).map((n) => Number(n.replace(/,/g, "")));
 
-    // A bare `in:`: how many records of each kind there are to search (GET /v1/search:counts), largest first.
-    const totals = page.waitForResponse((r) => new URL(r.url()).pathname === "/v1/search:counts");
-    await search.fill("in:");
-    expect((await totals).status()).toBe(200);
-    await expect(kinds.first()).toHaveText(/\d$/);
-    const bare = await countsOf();
-    expect(bare.length).toBeGreaterThan(3);
-    expect(bare).toEqual([...bare].sort((a, b) => b - a));
-
-    // With words: how many of THEIR results are of each kind - "letter" finds letter templates above all.
+    // How many of THEIR results are of each kind - "letter" finds letter templates above all. Every kind with a
+    // result comes before every kind without one.
     await search.fill("letter in:");
     await expect(kinds.first()).toHaveText(/^Letter templates [\d,]+\+?$/, { timeout: 30_000 });
     const worded = await countsOf();
-    expect(worded).toEqual([...worded].sort((a, b) => b - a));
+    const found = worded.filter((n) => n > 0);
+    expect(worded.slice(0, found.length)).toEqual(found);
+    expect(found).toEqual([...found].sort((a, b) => b - a));
   });
 
   test("a kind goes in the box under the name the app shows for it", async ({ as }) => {

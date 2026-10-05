@@ -233,9 +233,17 @@ export const statusPropOf = (entry: SearchEntry): string | undefined => entry.ma
  * state/status column can hold, lower-cased the way `status:` compares them. Read off the schema's enums, so it
  * costs no database read and cannot drift from what the column accepts. A collection whose status column is
  * free text, or that has none, answers no statuses.
+ *
+ * `reference` marks the kinds that are not somebody's records: the org-wide catalogs (`flat` - leave types,
+ * holidays, automations, ...) and the caller's own inbox (`self` - notifications). They are large and rarely what
+ * a search is narrowed to, so the palette offers them after the record kinds (paletteQuery.ts rankKindOffers).
  */
-export function searchVocabulary(listable: ReadonlySet<string>): { collection: string; statuses: string[] }[] {
-  return SEARCH_INDEX.filter((e) => listable.has(e.collection)).map((e) => ({ collection: e.collection, statuses: statusValuesOf(e) }));
+export function searchVocabulary(listable: ReadonlySet<string>): { collection: string; statuses: string[]; reference?: true }[] {
+  return SEARCH_INDEX.filter((e) => listable.has(e.collection)).map((e) => ({
+    collection: e.collection,
+    statuses: statusValuesOf(e),
+    ...(e.scoping.kind === "scoped" ? {} : { reference: true as const }),
+  }));
 }
 
 /** The values the entry's status column can hold, lower-cased; empty when it has none or it is free text. */

@@ -19,8 +19,15 @@ const DialogOverlay = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <DialogPrimitive.Overlay
     ref={ref}
+    // The backdrop's exit OUTLASTS the panel's (300ms against DialogContent's 200). Radix portals the two
+    // separately, each kept mounted only until its own exit animation ends, and they share a z-index - so DOM
+    // order decides which paints on top. Reopened in the gap after a shorter-lived backdrop had gone but before
+    // the panel had, the backdrop was portaled again at the END of <body>, over the panel still standing there:
+    // the prompt sat blurred under its own backdrop and every click on it dismissed it instead. The shared
+    // confirm does exactly that on every "delete, then re-apply the split?" pair. With the backdrop outliving the
+    // panel, the only possible split is the panel re-portaled after it, which is the right way up.
     className={cn(
-      "fixed inset-0 z-50 bg-overlay backdrop-blur-sm data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
+      "fixed inset-0 z-50 bg-overlay backdrop-blur-sm data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:duration-300 data-[state=open]:fade-in-0",
       className
     )}
     {...props}

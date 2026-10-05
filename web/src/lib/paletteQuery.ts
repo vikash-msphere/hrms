@@ -193,11 +193,13 @@ export function searchParams(q: PaletteQuery): string {
 // picking one can never produce a filter the search then ignores. A lone `?` offers the keys themselves.
 
 /** Per searchable collection the caller may list, its status values (`GET /v1/search:vocabulary`). */
-export type FilterVocabulary = readonly { collection: string; statuses: readonly string[] }[];
+// `reference`: a catalog or inbox kind rather than somebody's records (src/domain/searchIndex.ts searchVocabulary).
+export type FilterVocabulary = readonly { collection: string; statuses: readonly string[]; reference?: boolean }[];
 
 // `negate`: the `-` form, which leaves out what the plain form keeps.
 export type FilterSuggestion<P extends PalettePerson = PalettePerson> =
-  | { kind: "in"; token: string; collection: string; negate?: true }
+  // `prefix`: the kind's name or `in:` word STARTS with what is typed, rather than one of its later words.
+  | { kind: "in"; token: string; collection: string; negate?: true; prefix?: true }
   | { kind: "status"; token: string; status: string; collections: string[]; negate?: true }
   | { kind: "person"; token: string; person: P; negate?: true }
   | { kind: "is"; token: string; value: "mine" | "team"; negate?: true }
@@ -356,7 +358,11 @@ export function suggestFilters<P extends PalettePerson>(
     items = vocab
       .filter((v) => !named.has(v.collection) && matches(typed, v.collection, ctx.labelOf(v.collection)))
       .sort((a, b) => ctx.labelOf(a.collection).localeCompare(ctx.labelOf(b.collection)))
-      .map((v) => ({ kind: "in" as const, token: `${sign}in:${inWordOf(v.collection, all)}`, collection: v.collection, ...not }));
+      .map((v) => {
+        const inWord = inWordOf(v.collection, all);
+        const prefix = !!typed && [inWord, v.collection, ctx.labelOf(v.collection)].some((o) => o.toLowerCase().startsWith(typed));
+        return { kind: "in" as const, token: `${sign}in:${inWord}`, collection: v.collection, ...not, ...(prefix ? { prefix: true as const } : {}) };
+      });
   } else if (key === "status") {
     // Narrowed by `in:` already, only those collections' statuses; otherwise every status any collection has.
     const vocab = ctx.vocabulary ?? [];
@@ -432,9 +438,68 @@ export function suggestFilters<P extends PalettePerson>(
   // person is looking at.
   if (!items.length || items.some((s) => s.token === word)) return null;
   // Every kind for `in:`, not the first `limit` of them: its offers are chips in a row that scrolls, ranked by
-  // the palette by how much each kind holds (CommandPalette.tsx) - which this module does not know - so cutting
-  // here would cut alphabetically, and the kinds that hold the most went unoffered.
+  // `rankKindOffers` on signals this function does not have (results, the page, the person's use) - so cutting
+  // here would cut alphabetically, and the kinds that matter most could go unoffered.
   return { start: span.start, end: span.end, items: key === "in" ? items : items.slice(0, limit) };
+}
+
+/** What the `in:` suggestions are ranked by (`rankKindOffers`), each as the palette knows it. */
+export type KindSignals = {
+  // With other words in the box: how many of their results are of each kind, `capped` when the answer reached
+  // the server's cap. Absent on a bare `in:`, or while the answer is not in yet.
+  results?: { by: ReadonlyMap<string, number>; capped: boolean };
+  // On a bare `in:`: how many records of each kind words can find (GET /v1/search:counts). A kind missing here
+  // is uncounted, not empty - its scope names single records, which the counters cannot answer.
+  totals?: ReadonlyMap<string, number>;
+  pageKinds: ReadonlySet<string>; // shown on the page the search was opened from (resourceRoute.ts collectionsOnRoute)
+  affinity: ReadonlyMap<string, number>; // how much this person narrows to / opens each kind (lib/searchKinds.ts)
+  reference: ReadonlySet<string>; // catalogs and the caller's inbox, not somebody's records (FilterVocabulary)
+};
+
+/**
+ * The `in:` suggestions, most likely pick first, each with the number its chip shows. The first difference wins:
+ *   1. a name that starts with the typed letters, over one where a later word does (`in:re`: Reimbursements
+ *      before Leave requests);
+ *   2. with other words, where their results are - most first, a kind with none last (and muted: still a valid
+ *      narrowing, but not where these words land);
+ *   3. the kinds on the page the search was opened from;
+ *   4. the kinds this person narrows to and opens most;
+ *   5. somebody's records before catalogs and the inbox, which are large but rarely what is looked for;
+ *   6. on a bare `in:`, how many records words can find there - a count of what a search can reach, never of
+ *      rows that hold no text (migration 0011);
+ *   7. the order given (alphabetical, from suggestFilters).
+ * A row count measures what a kind holds, not what anybody looks for: the kinds that pile up rows (attendance
+ * punches, seeded automations) hold the most and are searched least - so it is the last real signal, not the first.
+ */
+export function rankKindOffers<T extends { collection: string; prefix?: true }>(
+  offers: readonly T[],
+  s: KindSignals,
+): { offer: T; count?: string; muted: boolean }[] {
+  const shown = (n: number) => `${n.toLocaleString()}${s.results?.capped ? "+" : ""}`;
+  return offers
+    .map((offer, i) => {
+      const found = s.results ? (s.results.by.get(offer.collection) ?? 0) : undefined;
+      const total = s.totals?.get(offer.collection);
+      return {
+        offer,
+        i,
+        found,
+        total,
+        page: s.pageKinds.has(offer.collection) ? 1 : 0,
+        use: s.affinity.get(offer.collection) ?? 0,
+        record: s.reference.has(offer.collection) ? 0 : 1,
+        count: found !== undefined ? shown(found) : total !== undefined ? total.toLocaleString() : undefined,
+      };
+    })
+    .sort((a, b) =>
+      (b.offer.prefix ? 1 : 0) - (a.offer.prefix ? 1 : 0)
+      || (b.found ?? 0) - (a.found ?? 0)
+      || b.page - a.page
+      || b.use - a.use
+      || b.record - a.record
+      || (b.total ?? -1) - (a.total ?? -1)
+      || a.i - b.i)
+    .map((r) => ({ offer: r.offer, count: r.count, muted: r.found === 0 }));
 }
 
 /**

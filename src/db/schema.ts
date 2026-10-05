@@ -3930,14 +3930,16 @@ export const searchDocs = sqliteTable("search_docs", {
   createdIdx: index("search_docs_created_idx").on(t.createdAt),
 }));
 
-// How many live `search_docs` rows there are, grouped by everything search visibility tests and nothing else:
-// the collection, the code with its last (record) segment taken off, the owner, and `restricted`. The search's
+// How many live `search_docs` rows WITH A TITLE there are (what typed words can find), grouped by everything
+// search visibility tests and nothing else: the collection, the code with its last (record) segment taken off,
+// the owner, and `restricted`. A row without a title is listed by `in:` and the filters but reached by no word,
+// and counting it put the kinds full of such rows (attendance punches) first in the `in:` chips. The search's
 // `in:` suggestions show each kind's total (services/globalSearch.ts searchKindCounts) by running the SAME
 // scope predicate over these rows that the search runs over `search_docs` - but a count of the index itself
 // reads every row the caller can see (`search_docs` has no index the scope can use), while this is a few rows
 // per kind per owner. Every grant names a code above a record's own segment, so the parent code answers the
 // subtree test exactly; per-record shares and denies cannot be answered here, and a kind with any is left out.
-// Kept in step by triggers on `search_docs` and filled once from it (migration 0010); `''` rather than NULL for a
+// Kept in step by triggers on `search_docs` and filled once from it (migration 0011); `''` rather than NULL for a
 // missing code or owner, because NULLs in a primary key are all distinct to SQLite.
 export const searchCounts = sqliteTable("search_counts", {
   collection: text("collection").notNull(),
