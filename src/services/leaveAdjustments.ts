@@ -6,10 +6,22 @@
 // month since their start date, with nothing deducted for leave taken in those years. An opening replaces that
 // reading with the figure from the system before: it takes off exactly what HRMS credited for the periods
 // before their records start (`domain/leave.ts creditedBeforeFloor`, `removed_days` on the row) and puts on
-// the balance HR entered. Everything that happened IN HRMS since - accrual after go-live, leave filed, an
-// encashment - stays exactly where it is, which is why an opening is a CHANGE to the balance rather than a new
-// value for it, and why it can be entered days after go-live without anybody reconstructing those movements.
-// A re-import moves the balance by the difference from the previous opening only.
+// the balance HR entered. Everything that happened IN HRMS since - accrual after go-live, leave filed (pending
+// or approved, since a request takes its days when it is filed), an encashment - stays exactly where it is,
+// which is why an opening is a CHANGE to the balance rather than a new value for it, and why it can be entered
+// days after go-live without anybody reconstructing those movements.
+//
+// THE SHEET'S DATE (`as_of`). The old system's sheet is a balance on the day it was made, which need not be the
+// day records start. Accrual is split at that day: periods that start before it are the sheet's, periods from
+// it on are HRMS's (the same rule as the records start, domain/leave.ts floorMs). A sheet made AFTER the
+// records start already holds the accrual HRMS credited in between, so that comes off too, and the accrual
+// marker moves past it so the walk never credits it again. A sheet made BEFORE them is missing the policy's
+// entitlement in between, which the opening puts on, and the leave taken in between, which arrives as history
+// (services/leaveHistoryImport.ts) moving no balance - so the opening takes that off. Either way the result is
+// the sheet's figure, plus HRMS accrual since its date, less the leave HRMS holds.
+//
+// Every opening of a balance is measured from the same place - the balance as HRMS alone would have it - so a
+// re-import moves it by the difference between what the new opening and all earlier ones put on.
 //
 // CORRECTIONS. HR moving a balance by hand, with a reason.
 //
@@ -19,7 +31,7 @@
 // other make the second fail and roll back instead of both landing (docs/architecture-decisions.md, "A checked
 // batch is not an atomic one"). The balance update is relative, so it composes with a leave request reserving
 // days or the nightly accrual in the same instant.
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, sql } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
@@ -29,13 +41,14 @@ import { keysetPage } from "./keysetPage";
 import { allocOwnedCodeRuns } from "./codeAlloc";
 import { getSettingValue } from "./settings";
 import { notifyMany } from "./notifications";
+import { orgToday } from "./orgDay";
 import { refLeaveTypes } from "../lib/refData";
 import { auditMany, createdMeta } from "../lib/audit";
 import { byIdChunks, chunk, runBatch, type BatchStmt } from "../lib/dbBatch";
 import { invalidArgument, failedPrecondition, notFound } from "../lib/errors";
 import { round2 } from "../domain/money";
 import { utcDay } from "../domain/attendance";
-import { creditedBeforeFloor, openingMarker, type AccrualInputs } from "../domain/leave";
+import { creditedBeforeFloor, entitlementBefore, floorMarker, openingMarker, type AccrualInputs } from "../domain/leave";
 import { mergeRestrictions } from "../domain/leaveRestrictions";
 
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
@@ -132,38 +145,54 @@ export async function createCorrection(deps: Deps, actor: AppUser, input: Correc
 
 // ---- Opening balances ----------------------------------------------------------------------------------------
 
-export type OpeningItem = { employee?: string; leave_type?: string; opening_days?: number; encashed_days?: number | null };
+export type OpeningItem = { employee?: string; leave_type?: string; opening_days?: number; encashed_days?: number | null; as_of?: string | null };
 export type OpeningOutcome = "applied" | "unchanged" | "error";
 export type OpeningResult = {
   employee: string;
   leave_type: string;
-  /** The day HRMS records start for the employee, which the opening is as of. */
+  /** The day the sheet's balance is as of: the item's `as_of`, or the records start when it has none. */
   as_of?: string;
+  /** The day HRMS records start for the employee. */
+  records_from?: string;
   /** The balance now. */
   current?: number;
-  /** What HRMS credited for the periods before `as_of` - taken off by a first opening, 0 on a re-import. */
-  removed?: number;
   /** The last opening entered for this balance, on a re-import. */
   previous_opening?: number;
   opening?: number;
+  /** HRMS accrual for the periods from `as_of` on, up to the last one credited. */
+  earned?: number;
+  /** Leave HRMS holds against the balance: requests filed here (and booked leave brought in), by state. */
+  leave_pending?: number;
+  leave_approved?: number;
+  /** Leave brought in as history that started on or after `as_of` - after the sheet, so not in it. */
+  leave_history?: number;
+  /** Every other movement since: corrections, encashments, the year-end carry-forward. */
+  other?: number;
   /** The signed change to the balance. */
   change?: number;
-  /** The balance after. */
+  /** The balance after: opening + earned - leave_pending - leave_approved - leave_history + other. */
   result?: number;
   outcome: OpeningOutcome;
   error?: string;
 };
 
+/** Far enough ahead to be after every period the walk could have credited, as a floor for "all of them". */
+const FAR_FLOOR = Date.UTC(9999, 0, 1);
+const dayMs = (s?: string | null) => (s && /^\d{4}-\d{2}-\d{2}$/.test(s) ? Date.parse(`${s}T00:00:00Z`) : NaN);
+
 /**
- * Preview (dry run) or apply opening balances. Each item is one employee x leave type: the balance they had
- * when their HRMS records started, and optionally the days already encashed that leave year before HRMS (so
- * the annual encashment cap counts them). Items are independent - one that cannot be applied is reported with
- * its reason and the rest go ahead - except that an apply is atomic per slice of `APPLY_CHUNK` items: a slice
- * that loses a race to a concurrent import rolls back whole and is reported as such, to be previewed again.
+ * Preview (dry run) or apply opening balances. Each item is one employee x leave type: the balance on the day
+ * the old system's sheet was made (`as_of`; the records start when absent), and optionally the days already
+ * encashed that leave year before HRMS (so the annual encashment cap counts them). Items are independent - one
+ * that cannot be applied is reported with its reason and the rest go ahead - except that an apply is atomic per
+ * slice of `APPLY_CHUNK` items: a slice that loses a race to a concurrent import rolls back whole and is
+ * reported as such, to be previewed again.
  */
 export async function importOpenings(deps: Deps, actor: AppUser, items: OpeningItem[], dryRun: boolean) {
   if (items.length > OPENING_BATCH_MAX) throw invalidArgument(`send at most ${OPENING_BATCH_MAX} opening balances per call`);
   const empIds = [...new Set(items.map((i) => idFromPath(i.employee)).filter((x): x is string => !!x))];
+  const today = await orgToday(deps);
+  const yearStart = `${today.slice(0, 4)}-01-01`;
 
   const employees = await byIdChunks(empIds, (ids) =>
     deps.db
@@ -186,13 +215,48 @@ export async function importOpenings(deps: Deps, actor: AppUser, items: OpeningI
       .from(schema.leaveAdjustments)
       .where(and(inArray(schema.leaveAdjustments.employeeId, ids), eq(schema.leaveAdjustments.kind, "opening"))),
   );
-  // The latest opening per balance: the one a re-import is measured against.
+  // Per balance: the latest opening (what "unchanged" compares against), the first (whose `removedDays` is
+  // what HRMS credited before the records start), and what all of them have put on so far.
   const priorByKey = new Map<string, Row>();
+  const firstByKey = new Map<string, Row>();
+  const appliedByKey = new Map<string, number>();
   for (const p of priors) {
     const k = `${p.employeeId}|${p.leaveTypeId}`;
     const cur = priorByKey.get(k);
     if (!cur || (p.openingSeq ?? 0) > (cur.openingSeq ?? 0)) priorByKey.set(k, p);
+    const first = firstByKey.get(k);
+    if (!first || (p.openingSeq ?? 0) < (first.openingSeq ?? 0)) firstByKey.set(k, p);
+    appliedByKey.set(k, round2((appliedByKey.get(k) ?? 0) + p.days));
   }
+  // The leave HRMS holds against each balance: every request filed here that is pending or approved (its days
+  // came off when it was filed), and booked leave brought in, which is the same kind of row.
+  const held = await byIdChunks(empIds, (ids) =>
+    deps.db
+      .select({ employeeId: schema.leaveRequests.employeeId, leaveTypeId: schema.leaveRequests.leaveTypeId, state: schema.leaveRequests.state, days: schema.leaveRequests.days })
+      .from(schema.leaveRequests)
+      .where(and(inArray(schema.leaveRequests.employeeId, ids), eq(schema.leaveRequests.source, "app"), inArray(schema.leaveRequests.state, ["PENDING", "APPROVED"]))),
+  );
+  const heldByKey = new Map<string, { pending: number; approved: number }>();
+  for (const r of held) {
+    const k = `${r.employeeId}|${r.leaveTypeId}`;
+    const cur = heldByKey.get(k) ?? { pending: 0, approved: 0 };
+    if (r.state === "PENDING") cur.pending = round2(cur.pending + r.days);
+    else cur.approved = round2(cur.approved + r.days);
+    heldByKey.set(k, cur);
+  }
+  // Leave brought in as history this leave year: what started after a sheet dated before the records start
+  // is in neither the sheet nor the balance.
+  const history = await byIdChunks(empIds, (ids) =>
+    deps.db
+      .select({ employeeId: schema.leaveRequests.employeeId, leaveTypeId: schema.leaveRequests.leaveTypeId, startDate: schema.leaveRequests.startDate, days: schema.leaveRequests.days })
+      .from(schema.leaveRequests)
+      .where(and(
+        inArray(schema.leaveRequests.employeeId, ids),
+        eq(schema.leaveRequests.source, "import"),
+        eq(schema.leaveRequests.state, "APPROVED"),
+        gte(schema.leaveRequests.startDate, new Date(dayMs(yearStart))),
+      )),
+  );
 
   const results: OpeningResult[] = [];
   const plans: (PlannedWrite & { index: number })[] = [];
@@ -210,11 +274,20 @@ export async function importOpenings(deps: Deps, actor: AppUser, items: OpeningI
     const key = `${emp.uuid}|${lt.uuid}`;
     if (seen.has(key)) return fail("this employee and leave type appear more than once");
     seen.add(key);
-    if (!emp.trackedFrom) return fail("set when HRMS records start for this person first - the opening is as of that day");
+    if (!emp.trackedFrom) return fail("set when HRMS records start for this person first - HRMS accrual for them counts from that day");
     const opening = typeof item.opening_days === "number" && Number.isFinite(item.opening_days) ? round2(item.opening_days) : NaN;
     if (Number.isNaN(opening) || opening < 0 || opening > MAX_DAYS) return fail(`the opening balance must be a number of days from 0 to ${MAX_DAYS}`);
     const encashed = item.encashed_days == null ? null : Number.isFinite(item.encashed_days) && item.encashed_days >= 0 ? round2(item.encashed_days) : NaN;
     if (encashed !== null && Number.isNaN(encashed)) return fail("encashed days must be zero or more");
+    const trackedMs = +new Date(emp.trackedFrom);
+    const asOfMs = item.as_of == null || item.as_of === "" ? trackedMs : dayMs(item.as_of);
+    if (Number.isNaN(asOfMs)) return fail("the sheet's date must be a date (YYYY-MM-DD)");
+    const asOf = utcDay(asOfMs);
+    if (asOf > today) return fail(`the sheet's date (${asOf}) is in the future`);
+    // A sheet from an earlier leave year predates the year-end carry-forward, which HRMS has already applied
+    // to the balance it would be measured against.
+    if (asOf < yearStart && asOfMs !== trackedMs) return fail(`the sheet's date (${asOf}) is before this leave year - use a sheet from ${yearStart} on`);
+    if (emp.startDate && asOfMs < +new Date(emp.startDate)) return fail(`the sheet's date (${asOf}) is before this person joined`);
 
     const bal = balByKey.get(key) ?? null;
     const prior = priorByKey.get(key);
@@ -230,23 +303,42 @@ export async function importOpenings(deps: Deps, actor: AppUser, items: OpeningI
       joiningRule: mergeRestrictions(orgRestrictions, lt.restrictions).accrual.joining_rule ?? null,
       pricedStartMs: bal?.accrualPricedStart ? +new Date(bal.accrualPricedStart) : null,
       pricedEndMs: bal?.accrualPricedEnd ? +new Date(bal.accrualPricedEnd) : null,
-      floorMs: +new Date(emp.trackedFrom),
+      floorMs: trackedMs,
     };
-    // A first opening replaces what HRMS credited before the floor; a re-import replaces the previous opening.
-    const removed = prior ? 0 : bal ? creditedBeforeFloor(inputs) : 0;
-    const change = round2(opening - (prior ? prior.openingDays ?? 0 : removed));
+    // What HRMS credited before the records start, which the first opening took (or takes) off.
+    const removed = prior ? firstByKey.get(key)?.removedDays ?? 0 : bal ? creditedBeforeFloor(inputs) : 0;
+    // The accrual between the records start and the sheet's date. Before the records start the walk never
+    // credits, so a sheet dated earlier is short the policy's entitlement for those periods; after them the walk
+    // has credited what it reached (its marker), and a sheet dated later already holds that.
+    const reached = asOfMs > trackedMs ? bal?.lastAccrualYm ?? null : undefined;
+    const between = asOfMs === trackedMs ? 0 : round2(entitlementBefore(inputs, trackedMs, reached) - entitlementBefore(inputs, asOfMs, reached));
+    // Leave brought in as history that started on or after a sheet dated before the records start.
+    const afterSheet = asOfMs < trackedMs
+      ? round2(history.filter((h) => h.employeeId === emp.uuid && h.leaveTypeId === lt.uuid && +h.startDate >= asOfMs && +h.startDate < trackedMs).reduce((n, h) => n + h.days, 0))
+      : 0;
+    // What the opening puts on against the balance HRMS alone would have; earlier openings are already on it.
+    const change = round2(opening - removed + between - afterSheet - (appliedByKey.get(key) ?? 0));
     const current = bal?.balanceDays ?? 0;
     const result = round2(current + change);
+    // From the opening on, the walk owns only the periods from the later of the two days.
+    const markerAt: AccrualInputs = { ...inputs, floorMs: Math.max(asOfMs, trackedMs) };
+    const marker = bal?.lastAccrualYm ? openingMarker(markerAt) : asOfMs > trackedMs ? floorMarker(markerAt) : null;
+    const lastCredited = [bal?.lastAccrualYm ?? null, floorMarker(markerAt)].filter((m): m is string => !!m).sort().pop() ?? null;
+    const earned = round2(entitlementBefore(inputs, FAR_FLOOR, lastCredited) - entitlementBefore(inputs, asOfMs));
+    const leave = heldByKey.get(key) ?? { pending: 0, approved: 0 };
     const base: OpeningResult = {
-      employee, leave_type, as_of: utcDay(+new Date(emp.trackedFrom)), current, removed, opening, change, result,
+      employee, leave_type, as_of: asOf, records_from: utcDay(trackedMs), current, opening, earned,
+      leave_pending: leave.pending, leave_approved: leave.approved, leave_history: afterSheet,
+      other: round2(result - (opening + earned - leave.pending - leave.approved - afterSheet)),
+      change, result,
       ...(prior ? { previous_opening: prior.openingDays ?? 0 } : {}),
       outcome: "applied",
     };
     if (result < 0) {
-      results.push({ ...base, outcome: "error", error: `the balance would end at ${result}: more was used in HRMS since ${base.as_of} than this opening allows` });
+      results.push({ ...base, outcome: "error", error: `the balance would end at ${result}: more leave is held in HRMS than this opening allows` });
       return;
     }
-    if (prior && change === 0 && (prior.encashedDays ?? null) === encashed) {
+    if (prior && change === 0 && (prior.encashedDays ?? null) === encashed && (prior.asOf ? utcDay(+prior.asOf) : null) === asOf) {
       results.push({ ...base, outcome: "unchanged" });
       return;
     }
@@ -254,7 +346,7 @@ export async function importOpenings(deps: Deps, actor: AppUser, items: OpeningI
     plans.push({
       index: results.length - 1,
       employeeId: emp.uuid, employeeCode: emp.code, leaveTypeId: lt.uuid, kind: "opening", days: change, balance: bal,
-      opening: { openingDays: opening, removedDays: removed, encashedDays: encashed, asOf: new Date(emp.trackedFrom), seq: (prior?.openingSeq ?? 0) + 1, marker: openingMarker(inputs) },
+      opening: { openingDays: opening, removedDays: prior ? 0 : removed, encashedDays: encashed, asOf: new Date(asOfMs), seq: (prior?.openingSeq ?? 0) + 1, marker },
     });
   });
 
@@ -364,7 +456,10 @@ async function writeAdjustments(deps: Deps, actor: AppUser, plans: PlannedWrite[
       );
     } else {
       stmts.push(
-        deps.db.insert(schema.leaveBalances).values({ code: next(balCodes, takeBal, p.employeeId), employeeId: p.employeeId, leaveTypeId: p.leaveTypeId, balanceDays: round2(p.days) }),
+        deps.db.insert(schema.leaveBalances).values({
+          code: next(balCodes, takeBal, p.employeeId), employeeId: p.employeeId, leaveTypeId: p.leaveTypeId, balanceDays: round2(p.days),
+          ...(p.opening?.marker ? { lastAccrualYm: p.opening.marker } : {}),
+        }),
       );
     }
   }

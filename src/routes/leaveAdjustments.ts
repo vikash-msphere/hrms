@@ -46,6 +46,7 @@ const importSchema = z
             leave_type: z.string(),
             opening_days: nonNegativeDays(),
             encashed_days: nonNegativeDays().nullable().optional(),
+            as_of: z.string().nullable().optional(),
           })
           .strict(),
       )
@@ -62,7 +63,7 @@ const importSchema = z
 // `dry_run` previews rather than applies.
 export const leaveAdjustmentImport = new Hono<AppEnv>().post("/", async (c) => {
   const parsed = importSchema.safeParse(await jsonBody(c));
-  if (!parsed.success) throw invalidArgument(`send up to ${OPENING_BATCH_MAX} opening balances as { items: [{ employee, leave_type, opening_days, encashed_days? }] }`);
+  if (!parsed.success) throw invalidArgument(`send up to ${OPENING_BATCH_MAX} opening balances as { items: [{ employee, leave_type, opening_days, encashed_days?, as_of? }] }`);
   const dryRun = parsed.data.dry_run !== false;
   return c.json(await importOpenings(c.get("deps"), c.get("user"), parsed.data.items, dryRun));
 });

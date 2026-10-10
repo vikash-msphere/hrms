@@ -505,12 +505,12 @@ export const leaveBalances = sqliteTable("leave_balances", {
 // A change to a leave balance that no accrual, request or encashment explains, kept as a LEDGER: each row is
 // the signed number of days it moved the balance by, and no row is ever edited - a mistake is corrected by
 // another row (services/leaveAdjustments.ts). Two kinds:
-//   - `opening`: the balance somebody had when HRMS records started for them (`employees.trackedFrom`), from
-//     the system before it. The first one also REMOVES what HRMS had credited for the periods before that day
-//     (`removedDays`, domain/leave.ts creditedBeforeFloor); a re-import moves the balance by the difference
-//     from the last opening only. `openingSeq` numbers them per (employee, type), and the unique index on it is
-//     the lock: two imports of the same opening racing each other make the second one fail and roll back,
-//     rather than both applying.
+//   - `opening`: the balance somebody had on the day the old system's sheet was made (`asOf`), from the system
+//     before HRMS. The first one also REMOVES what HRMS had credited for the periods before their records
+//     start (`employees.trackedFrom`; `removedDays`, domain/leave.ts creditedBeforeFloor); a re-import moves
+//     the balance by the difference from what earlier openings put on. `openingSeq` numbers them per
+//     (employee, type), and the unique index on it is the lock: two imports of the same opening racing each
+//     other make the second one fail and roll back, rather than both applying.
 //   - `correction`: HR moving a balance by hand, with the reason on the row.
 // Employee-owned and code-scoped like the balance it moves; private by default.
 export const leaveAdjustments = sqliteTable("leave_adjustments", {
@@ -521,9 +521,9 @@ export const leaveAdjustments = sqliteTable("leave_adjustments", {
   kind: text("kind", { enum: ["opening", "correction"] }).notNull(),
   days: real("days").notNull(), // the signed change this row made to the balance
   openingDays: real("opening_days"), // opening: the balance entered, as of `asOf`
-  removedDays: real("removed_days"), // opening: what HRMS had credited before `asOf`, taken off by the first one
+  removedDays: real("removed_days"), // opening: what HRMS had credited before the records start, taken off by the first one
   encashedDays: real("encashed_days"), // opening: days already encashed this leave year before HRMS
-  asOf: integer("as_of", { mode: "timestamp_ms" }), // opening: the employee's tracked_from it was measured against
+  asOf: integer("as_of", { mode: "timestamp_ms" }), // opening: the day the sheet's balance is as of (tracked_from when none was given)
   openingSeq: integer("opening_seq"), // opening: 1 for the first, then one more per re-import
   reason: text("reason"),
   createdBy: text("created_by").references(() => users.uuid),

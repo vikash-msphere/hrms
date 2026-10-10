@@ -79,6 +79,9 @@ test("brings over a leave balance, leave history and the year's pay through the 
     const leave = page.locator("div").filter({ has: page.getByLabel("Opening balances sheet") }).last();
     await leave.getByLabel("Opening balances sheet").fill(`Employee ID\tName\t${type.display_name}\n${person.email}\t${person.name}\t7.5`);
     await expect(leave.getByText("1 balance read from 1 of 1 line")).toBeVisible();
+    // The sheet is as of the records start here, so the balance lands on exactly its figure.
+    await expect(leave.getByRole("button", { name: "Preview" })).toBeDisabled();
+    await leave.getByLabel("Sheet date").fill(tracked);
     await leave.getByRole("button", { name: "Preview" }).click();
     await expect(leave.getByRole("cell", { name: person.name })).toBeVisible({ timeout: 30_000 });
     await leave.getByRole("button", { name: "Apply 1 balance" }).click();

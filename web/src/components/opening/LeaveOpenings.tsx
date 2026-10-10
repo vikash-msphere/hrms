@@ -2,6 +2,7 @@ import { useMemo, useRef, useState } from "react";
 import { CalendarRange, Download, FileUp } from "lucide-react";
 import { invoke } from "@/api";
 import { cn, formatDate, round2 } from "@/lib/utils";
+import { todayStr } from "@/lib/orgDay";
 import { exportTable } from "@/lib/exportTable";
 import { confirmDecision } from "@/lib/confirmDecision";
 import { openingItems, openingTemplate, parseOpenings } from "@/lib/openingImport";
@@ -13,13 +14,17 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { Input } from "@/components/ui/input";
+import { Field } from "@/components/common/Field";
 import type { Employee, LeaveType } from "@/types";
 
 // Opening leave balances (services/leaveAdjustments.ts `importOpenings`), from the old system's sheet.
 //
 // Three steps, and only the last one writes: read the sheet here (lib/openingImport.ts says per line what it
-// could not read), let the SERVER preview every balance - it alone knows what HRMS credited for the years before
-// each person's records start, which is what the opening replaces - and apply what the preview showed.
+// could not read) along with the day the sheet was made, let the SERVER preview every balance - it alone knows
+// what HRMS credited and what leave it holds - and apply what the preview showed. The preview reads as a sum:
+// the sheet's figure, plus HRMS accrual since its date, less the leave HRMS holds, plus anything else, is what
+// the person has left.
 
 /** Items per call, matching OPENING_BATCH_MAX on the server. */
 const PER_CALL = 100;
@@ -29,9 +34,13 @@ type Result = {
   leave_type: string;
   as_of?: string;
   current?: number;
-  removed?: number;
   previous_opening?: number;
   opening?: number;
+  earned?: number;
+  leave_pending?: number;
+  leave_approved?: number;
+  leave_history?: number;
+  other?: number;
   change?: number;
   result?: number;
   outcome: "applied" | "unchanged" | "error";
@@ -40,6 +49,8 @@ type Result = {
 type Answer = { dry_run: boolean; counts: Record<Result["outcome"], number>; results: Result[] };
 
 const fmt = (n: number | undefined) => (n == null ? "-" : String(round2(n)));
+const signed = (n: number | undefined) => (n == null ? "-" : n > 0 ? `+${round2(n)}` : String(round2(n)));
+const leaveHeld = (r: Result) => round2((r.leave_pending ?? 0) + (r.leave_approved ?? 0) + (r.leave_history ?? 0));
 
 export function LeaveOpenings() {
   const { toast } = useToast();
@@ -52,6 +63,11 @@ export function LeaveOpenings() {
   const typeOf = useMemo(() => new Map(types.map((t) => [t.path, t.display_name ?? ""])), [types]);
 
   const [text, setText] = useState("");
+  // The day the old system's figures are as of. Asked for, never assumed: a sheet exported weeks before (or
+  // after) the records start reads very differently, and today is rarely the right guess.
+  const [sheetDate, setSheetDate] = useState("");
+  const today = todayStr();
+  const yearStart = `${today.slice(0, 4)}-01-01`;
   const fileRef = useRef<HTMLInputElement | null>(null);
   const parsed = useMemo(() => (text.trim() ? parseOpenings(text, employees, types) : null), [text, employees, types]);
   const items = useMemo(() => (parsed ? openingItems(parsed) : []), [parsed]);
@@ -66,7 +82,8 @@ export function LeaveOpenings() {
     const merged: Answer = { dry_run: dryRun, counts: { applied: 0, unchanged: 0, error: 0 }, results: [] };
     for (let i = 0; i < items.length; i += PER_CALL) {
       setProgress(`${Math.min(i + PER_CALL, items.length)} of ${items.length}`);
-      const part = await invoke<Answer>("leave-adjustments", "importOpenings", undefined, { items: items.slice(i, i + PER_CALL), dry_run: dryRun });
+      const slice = items.slice(i, i + PER_CALL).map((it) => ({ ...it, as_of: sheetDate }));
+      const part = await invoke<Answer>("leave-adjustments", "importOpenings", undefined, { items: slice, dry_run: dryRun });
       merged.results.push(...part.results);
       for (const k of ["applied", "unchanged", "error"] as const) merged.counts[k] += part.counts[k];
     }
@@ -113,6 +130,8 @@ export function LeaveOpenings() {
   }
 
   const applied = answer && !answer.dry_run;
+  // "Other" earns a column only when some balance has movements besides accrual and leave.
+  const showOther = !!answer?.results.some((r) => r.other);
   return (
     <Card>
       <CardHeader>
@@ -120,13 +139,23 @@ export function LeaveOpenings() {
           <CalendarRange className="h-4 w-4 text-muted-foreground" /> Leave balances
         </CardTitle>
         <CardDescription>
-          The balance each person had on the day HRMS records started for them, as the system before HRMS had it: everything earned up to
-          then under your leave policy, less everything taken. If the old system already took off leave booked for dates from then on,
-          add those days back here and bring the leave in below as booked leave, so it comes off once. HRMS takes off what it credited
-          for the years before that day and keeps everything that happened in HRMS since. Re-importing a sheet changes only what differs.
+          The balance each person had on the day the old system's sheet was made: everything earned up to then under your leave policy,
+          less everything taken. HRMS adds its own accrual from that day on and takes off the leave it holds (pending and approved
+          requests, and leave brought in below that started after the sheet), so each person ends with what they have left. If the sheet
+          already took off leave booked for later dates, add those days back here and bring the leave in below as booked leave, so it
+          comes off once. Re-importing a sheet changes only what differs.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
+        <Field label="Sheet date" hint="The day the old system's balances are as of, not the day you import them." className="w-56">
+          <Input
+            type="date"
+            value={sheetDate}
+            min={yearStart}
+            max={today}
+            onChange={(e) => { setSheetDate(e.target.value); setAnswer(null); }}
+          />
+        </Field>
         <div className="flex flex-wrap gap-2">
           <Button variant="outline" size="sm" onClick={downloadTemplate}><Download className="h-4 w-4" /> Download the sheet to fill in</Button>
           <Button variant="outline" size="sm" onClick={() => fileRef.current?.click()}><FileUp className="h-4 w-4" /> Upload a CSV</Button>
@@ -165,8 +194,9 @@ export function LeaveOpenings() {
         )}
         <div className="flex flex-wrap items-center gap-2">
           <AccessAction collection="leave-adjustments" verb="importOpenings" label="Bring in opening leave balances">
-            <Button variant="outline" loading={busy === "preview"} disabled={!items.length || !!busy} onClick={() => preview()}>Preview</Button>
+            <Button variant="outline" loading={busy === "preview"} disabled={!items.length || !sheetDate || !!busy} onClick={() => preview()}>Preview</Button>
           </AccessAction>
+          {items.length > 0 && !sheetDate && <span className="text-xs text-muted-foreground">Enter the sheet date to preview.</span>}
           {progress && <span className="text-xs text-muted-foreground tabular-nums">{progress}…</span>}
         </div>
 
@@ -185,9 +215,11 @@ export function LeaveOpenings() {
                     <th className="px-3 py-2 font-medium">Person</th>
                     <th className="px-3 py-2 font-medium">Leave type</th>
                     <th className="px-3 py-2 text-right font-medium">Now</th>
-                    <th className="px-3 py-2 text-right font-medium">Credited before HRMS</th>
-                    <th className="px-3 py-2 text-right font-medium">Opening</th>
-                    <th className="px-3 py-2 text-right font-medium">After</th>
+                    <th className="px-3 py-2 text-right font-medium">Sheet</th>
+                    <th className="px-3 py-2 text-right font-medium">Earned since</th>
+                    <th className="px-3 py-2 text-right font-medium">Leave in HRMS</th>
+                    {showOther && <th className="px-3 py-2 text-right font-medium">Other</th>}
+                    <th className="px-3 py-2 text-right font-medium">Left</th>
                     <th className="px-3 py-2 font-medium">Result</th>
                   </tr>
                 </thead>
@@ -196,15 +228,35 @@ export function LeaveOpenings() {
                     <tr key={`${r.employee}|${r.leave_type}|${i}`} className={cn(r.outcome === "error" && "bg-destructive/5")}>
                       <td className="px-3 py-2">
                         {nameOf.get(r.employee) ?? r.employee}
-                        {r.as_of && <span className="block text-[11px] text-muted-foreground">as of {formatDate(r.as_of)}</span>}
+                        {r.as_of && <span className="block text-[11px] text-muted-foreground">sheet of {formatDate(r.as_of)}</span>}
                       </td>
                       <td data-label="Leave type" className="px-3 py-2">{typeOf.get(r.leave_type) ?? r.leave_type}</td>
                       <td data-label="Now" className="px-3 py-2 text-right tabular-nums">{fmt(r.current)}</td>
-                      <td data-label="Credited before HRMS" className="px-3 py-2 text-right tabular-nums">
-                        {r.previous_opening != null ? <span className="text-muted-foreground">opened before at {fmt(r.previous_opening)}</span> : fmt(r.removed)}
+                      <td data-label="Sheet" className="px-3 py-2 text-right tabular-nums">
+                        {fmt(r.opening)}
+                        {r.previous_opening != null && r.previous_opening !== r.opening && (
+                          <span className="block text-[11px] text-muted-foreground">was {fmt(r.previous_opening)}</span>
+                        )}
                       </td>
-                      <td data-label="Opening" className="px-3 py-2 text-right tabular-nums">{fmt(r.opening)}</td>
-                      <td data-label="After" className="px-3 py-2 text-right font-medium tabular-nums">{fmt(r.result)}</td>
+                      <td data-label="Earned since" className="px-3 py-2 text-right tabular-nums">{r.earned == null ? "-" : signed(r.earned)}</td>
+                      <td data-label="Leave in HRMS" className="px-3 py-2 text-right tabular-nums">
+                        {r.outcome === "error" && r.leave_pending == null ? "-" : signed(-leaveHeld(r))}
+                        {leaveHeld(r) > 0 && (
+                          <span className="block text-[11px] text-muted-foreground">
+                            {[
+                              r.leave_pending ? `${fmt(r.leave_pending)} pending` : "",
+                              r.leave_approved ? `${fmt(r.leave_approved)} approved` : "",
+                              r.leave_history ? `${fmt(r.leave_history)} brought in` : "",
+                            ].filter(Boolean).join(" · ")}
+                          </span>
+                        )}
+                      </td>
+                      {showOther && (
+                        <td data-label="Other" className="px-3 py-2 text-right tabular-nums" title="Corrections, encashments and the year-end carry-forward since the sheet">
+                          {r.other ? signed(r.other) : "-"}
+                        </td>
+                      )}
+                      <td data-label="Left" className="px-3 py-2 text-right font-medium tabular-nums">{fmt(r.result)}</td>
                       <td data-label="Result" className="px-3 py-2">
                         {r.outcome === "error" ? (
                           <span className="text-xs text-destructive">{r.error}</span>

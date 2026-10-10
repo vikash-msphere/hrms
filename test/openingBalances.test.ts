@@ -12,6 +12,7 @@ import { genId } from "../src/lib/idCodec";
 import { bustRef } from "../src/lib/refData";
 import { accrueLeave } from "../src/services/leaveAccrual";
 import { createCorrection, importOpenings } from "../src/services/leaveAdjustments";
+import { importLeaveHistory } from "../src/services/leaveHistoryImport";
 import { encashedDaysThisYear, encashedDaysThisYearAll } from "../src/services/leaveEncashments";
 import { updateEmployee } from "../src/services/employees";
 import { orgYear } from "../src/services/orgDay";
@@ -96,7 +97,10 @@ describe("an opening balance replaces the backlog the first night credited", () 
   it("previews without writing, then applies exactly the old system's figure", async () => {
     const { emp, el, admin } = await goLive();
     const preview = await importOpenings(deps, admin, [item(emp.id, el, 10)], true);
-    expect(preview.results[0]).toMatchObject({ outcome: "applied", as_of: "2026-09-24", current: 67, removed: 67, opening: 10, change: -57, result: 10 });
+    expect(preview.results[0]).toMatchObject({
+      outcome: "applied", as_of: "2026-09-24", records_from: "2026-09-24", current: 67, opening: 10,
+      earned: 0, leave_pending: 0, leave_approved: 0, leave_history: 0, other: 0, change: -57, result: 10,
+    });
     expect((await balanceOf(emp.id, el))!.balanceDays).toBe(67);
     expect(await ledger(emp.id)).toEqual([]);
 
@@ -115,7 +119,9 @@ describe("an opening balance replaces the backlog the first night credited", () 
     // Two days taken in HRMS on 25 September, against the inflated balance.
     await deps.db.update(schema.leaveBalances).set({ balanceDays: 65 }).where(and(eq(schema.leaveBalances.employeeId, emp.id), eq(schema.leaveBalances.leaveTypeId, el)));
     const r = await importOpenings(deps, admin, [item(emp.id, el, 10)], false);
-    expect(r.results[0]).toMatchObject({ current: 65, removed: 67, change: -57, result: 8 });
+    // Moved by hand, with no request behind it: it reads as "other", and the sum still comes out.
+    expect(r.results[0]).toMatchObject({ current: 65, other: -2, change: -57, result: 8 });
+    expect((await ledger(emp.id))[0]).toMatchObject({ removedDays: 67 });
     expect((await balanceOf(emp.id, el))!.balanceDays).toBe(8);
   });
 
@@ -123,7 +129,7 @@ describe("an opening balance replaces the backlog the first night credited", () 
     const { emp, el, admin } = await goLive();
     await importOpenings(deps, admin, [item(emp.id, el, 10)], false);
     const again = await importOpenings(deps, admin, [item(emp.id, el, 12)], false);
-    expect(again.results[0]).toMatchObject({ removed: 0, previous_opening: 10, change: 2, result: 12 });
+    expect(again.results[0]).toMatchObject({ previous_opening: 10, change: 2, result: 12 });
     expect((await balanceOf(emp.id, el))!.balanceDays).toBe(12);
     const same = await importOpenings(deps, admin, [item(emp.id, el, 12)], false);
     expect(same.counts).toEqual({ applied: 0, unchanged: 1, error: 0 });
@@ -172,12 +178,104 @@ describe("an opening balance replaces the backlog the first night credited", () 
     expect(noDate.results[0]!.error).toMatch(/HRMS records start/);
     await setTracked(emp.id, "2026-09-24");
     const r = await importOpenings(deps, admin, [item(emp.id, el, 5)], false);
-    expect(r.results[0]).toMatchObject({ current: 0, removed: 0, change: 5, result: 5 });
+    expect(r.results[0]).toMatchObject({ current: 0, change: 5, result: 5 });
     expect((await balanceOf(emp.id, el))!.balanceDays).toBe(5);
     // The next night starts it at the floor: October only.
     at("2026-10-01T02:00:00Z");
     await accrueLeave(deps);
     expect((await balanceOf(emp.id, el))!.balanceDays).toBe(6);
+  });
+});
+
+/** Leave filed in HRMS: the request, and the days it takes off the balance when it is filed. */
+async function holdLeave(employeeId: string, leaveTypeId: string, state: "PENDING" | "APPROVED", days: number, startYmd: string) {
+  const start = new Date(`${startYmd}T00:00:00Z`);
+  await deps.db.insert(schema.leaveRequests).values({ uuid: genId(), code: `lr-${genId().slice(0, 6)}`, employeeId, leaveTypeId, startDate: start, endDate: start, days, state });
+  const bal = (await balanceOf(employeeId, leaveTypeId))!;
+  await deps.db.update(schema.leaveBalances).set({ balanceDays: bal.balanceDays - days }).where(eq(schema.leaveBalances.uuid, bal.uuid));
+}
+/** Leave brought in as history: approved, and it moved no balance. */
+const historyLeave = (employeeId: string, leaveTypeId: string, startYmd: string, endYmd: string, days: number) =>
+  deps.db.insert(schema.leaveRequests).values({
+    uuid: genId(), code: `lr-${genId().slice(0, 6)}`, employeeId, leaveTypeId, startDate: new Date(`${startYmd}T00:00:00Z`), endDate: new Date(`${endYmd}T00:00:00Z`),
+    days, state: "APPROVED", source: "import",
+  });
+const dated = (employeeId: string, leaveTypeId: string, opening_days: number, as_of: string) => ({ ...item(employeeId, leaveTypeId, opening_days), as_of });
+
+describe("an opening from a sheet made on another day", () => {
+  it("made after the records start: the sheet already has the accrual since, and leave HRMS holds still comes off", async () => {
+    const { emp, el, admin } = await goLive();
+    at("2026-10-01T02:00:00Z");
+    await accrueLeave(deps); // October's day: 68
+    await holdLeave(emp.id, el, "PENDING", 2, "2026-10-20");
+    await holdLeave(emp.id, el, "APPROVED", 1, "2026-10-07");
+    at("2026-10-09T06:00:00Z");
+    const r = await importOpenings(deps, admin, [dated(emp.id, el, 15, "2026-10-05")], false);
+    // 15 on the sheet (October's day included), less 2 pending and 1 approved.
+    expect(r.results[0]).toMatchObject({
+      as_of: "2026-10-05", records_from: "2026-09-24", current: 65, opening: 15, earned: 0, leave_pending: 2, leave_approved: 1, other: 0, change: -53, result: 12,
+    });
+    expect((await balanceOf(emp.id, el))!.balanceDays).toBe(12);
+    expect((await ledger(emp.id))[0]).toMatchObject({ removedDays: 67, asOf: new Date("2026-10-05T00:00:00Z") });
+
+    // The same sheet again changes nothing; the same figures as of another day are a different opening.
+    expect((await importOpenings(deps, admin, [dated(emp.id, el, 15, "2026-10-05")], false)).counts).toEqual({ applied: 0, unchanged: 1, error: 0 });
+    const earlier = await importOpenings(deps, admin, [dated(emp.id, el, 15, "2026-09-24")], false);
+    // As of the records start, October's day is HRMS's own and stays on.
+    expect(earlier.results[0]).toMatchObject({ previous_opening: 15, earned: 1, change: 1, result: 13 });
+
+    // November is credited; October is not credited a second time.
+    at("2026-11-01T02:00:00Z");
+    await accrueLeave(deps);
+    expect((await balanceOf(emp.id, el))!.balanceDays).toBe(14);
+  });
+
+  it("made after the records start, for a balance HRMS has not credited yet: the walk starts after the sheet", async () => {
+    const emp = await seedEmployee();
+    const el = await seedLeaveType();
+    const admin = await seedAdmin();
+    await setTracked(emp.id, "2026-09-24");
+    at("2026-10-09T06:00:00Z");
+    const r = await importOpenings(deps, admin, [dated(emp.id, el, 5, "2026-10-05")], false);
+    expect(r.results[0]).toMatchObject({ current: 0, earned: 0, change: 5, result: 5 });
+    at("2026-11-01T02:00:00Z");
+    await accrueLeave(deps);
+    expect((await balanceOf(emp.id, el))!.balanceDays).toBe(6); // November only: October is the sheet's
+  });
+
+  it("made before the records start: the policy's accrual in between goes on, and the leave taken in between comes off", async () => {
+    const { emp, el, admin } = await goLive(); // credited through September
+    await historyLeave(emp.id, el, "2026-09-02", "2026-09-03", 2); // after the sheet, before the records start
+    await historyLeave(emp.id, el, "2026-08-10", "2026-08-10", 1); // before the sheet: already in it
+    const r = await importOpenings(deps, admin, [dated(emp.id, el, 9, "2026-08-20")], false);
+    // 9 on the sheet, plus September's day, less the two days taken in September.
+    expect(r.results[0]).toMatchObject({ as_of: "2026-08-20", current: 67, opening: 9, earned: 1, leave_history: 2, other: 0, change: -59, result: 8 });
+    expect((await balanceOf(emp.id, el))!.balanceDays).toBe(8);
+
+    // Leave brought in afterwards splits at the sheet's date: after it, the days come off once; before it, the
+    // sheet already has them; across it, the sheet has to say which days are which.
+    const brought = await importLeaveHistory(deps, admin, [
+      { employee: `employees/${emp.id}`, leave_type: `leave-types/${el}`, start_date: "2026-09-14", end_date: "2026-09-14", days: 1 },
+      { employee: `employees/${emp.id}`, leave_type: `leave-types/${el}`, start_date: "2026-08-03", end_date: "2026-08-03", days: 1 },
+      { employee: `employees/${emp.id}`, leave_type: `leave-types/${el}`, start_date: "2026-08-19", end_date: "2026-08-21", days: 3 },
+    ], false);
+    expect(brought.results.map((x) => x.kind ?? x.error)).toEqual(["booked", "history", expect.stringMatching(/opening balance sheet \(2026-08-20\)/)]);
+    expect((await balanceOf(emp.id, el))!.balanceDays).toBe(7);
+    // …and re-importing the sheet does not take the booked day off a second time.
+    expect((await importOpenings(deps, admin, [dated(emp.id, el, 9, "2026-08-20")], true)).counts).toEqual({ applied: 0, unchanged: 1, error: 0 });
+  });
+
+  it("refuses a sheet date in the future, before this leave year, before the person joined, or not a date", async () => {
+    const emp = await seedEmployee("2026-03-10");
+    const el = await seedLeaveType();
+    const admin = await seedAdmin();
+    await setTracked(emp.id, "2026-09-24");
+    // One item per balance per call, so each date is its own call.
+    const errorFor = async (as_of: string) => (await importOpenings(deps, admin, [dated(emp.id, el, 1, as_of)], true)).results[0]!.error;
+    expect(await errorFor("2026-10-30")).toMatch(/in the future/);
+    expect(await errorFor("2025-12-31")).toMatch(/before this leave year/);
+    expect(await errorFor("2026-02-01")).toMatch(/before this person joined/);
+    expect(await errorFor("05/10/2026")).toMatch(/must be a date/);
   });
 });
 

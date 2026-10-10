@@ -1,23 +1,24 @@
 // Leave from the system before HRMS, brought in from a sheet (`leave-requests:importHistory`,
-// opening-balances-plan.md). Two kinds of row, told apart by the person's records-start day
-// (`employees.trackedFrom`):
+// opening-balances-plan.md). Two kinds of row, told apart by the day the balance's opening is as of - the date
+// of the old system's sheet (services/leaveAdjustments.ts) - or, before one is entered, the person's
+// records-start day (`employees.trackedFrom`). Below, "the split" is that day.
 //
-// HISTORY - leave that ended before the records start. The leave policy counts requests: a yearly quota, a
+// HISTORY - leave that started before the split. The leave policy counts requests: a yearly quota, a
 // lifetime limit (maternity), the probation cap, the gap between two leaves. Leave somebody took in March in
 // the system before is none of those, so an employee who used their whole quota before go-live could file it
 // again the day after. A history row is that leave as an APPROVED request with `source: import`: every rule
 // counts it, and nothing else happens - no balance moves (the opening balance already has it taken off,
 // services/leaveAdjustments.ts), nobody is notified, no event fires.
 //
-// BOOKED - leave the system before HRMS had already approved for dates from the records start on (a week in
-// October, approved in August). It has to exist here, or those days read as absences and are docked. It lands
-// as an ordinary APPROVED request (`source: app`) and takes its days off the balance ONCE, here - which is why
-// the opening balance is the figure BEFORE the old system deducted it (docs/opening-balances.md). Nobody is
-// notified: it was decided in the other system. After that it is leave like any other, cancellable (and
-// refunded) until it starts.
+// BOOKED - leave from the split on: what the system before HRMS had approved for later dates (a week in
+// October, approved in August), and leave taken between a sheet dated before the records start and the records
+// start. It has to exist here, or those days read as absences and are docked. It lands as an ordinary APPROVED
+// request (`source: app`) and takes its days off the balance ONCE, here - which is why the opening balance is
+// the figure BEFORE the old system deducted it (docs/opening-balances.md). Nobody is notified: it was decided in
+// the other system. After that it is leave like any other, cancellable (and refunded) until it starts.
 //
-// A row that straddles the records-start day is refused: half of it is history and half of it is booked, and
-// the two halves move the balance differently, so the sheet has to say which days are which.
+// A row that straddles the split is refused: half of it is history and half of it is booked, and the two
+// halves move the balance differently, so the sheet has to say which days are which.
 import { and, eq, gte, inArray, lte, isNull, sql } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
@@ -70,7 +71,7 @@ export type HistoryResult = {
   days?: number;
   /** Where `days` came from: the file, or counted the way a request filed now would be. */
   days_from?: "file" | "counted";
-  /** history: taken before the records start, moves no balance. booked: from the records start on, takes its days off. */
+  /** history: started before the split (see the top of this file), moves no balance. booked: from the split on, takes its days off. */
   kind?: HistoryKind;
   outcome: HistoryOutcome;
   error?: string;
@@ -91,6 +92,8 @@ type Plan = {
   reason: string | null;
   /** The balance a booked row takes its days from, as read, or null when the person has none for the type yet. */
   balance: BalanceRow | null;
+  /** The person's records-start day: paid leave before it owes nothing, so no pay period needs restating. */
+  trackedMs: number;
 };
 
 const balanceKey = (employeeId: string, leaveTypeId: string) => `${employeeId}|${leaveTypeId}`;
@@ -124,6 +127,20 @@ export async function importLeaveHistory(deps: Deps, actor: AppUser, items: Hist
   // The balances booked leave takes its days from.
   const balances = await byIdChunks(empIds, (ids) => deps.db.select().from(schema.leaveBalances).where(inArray(schema.leaveBalances.employeeId, ids)));
   const balanceOf = new Map(balances.map((b) => [balanceKey(b.employeeId, b.leaveTypeId), b]));
+  // The day each balance's latest opening is as of: where history ends and booked leave begins for it.
+  const openings = await byIdChunks(empIds, (ids) =>
+    deps.db
+      .select({ employeeId: schema.leaveAdjustments.employeeId, leaveTypeId: schema.leaveAdjustments.leaveTypeId, asOf: schema.leaveAdjustments.asOf, openingSeq: schema.leaveAdjustments.openingSeq })
+      .from(schema.leaveAdjustments)
+      .where(and(inArray(schema.leaveAdjustments.employeeId, ids), eq(schema.leaveAdjustments.kind, "opening"))),
+  );
+  const openingAsOf = new Map<string, { seq: number; asOf: number }>();
+  for (const o of openings) {
+    if (!o.asOf) continue;
+    const k = balanceKey(o.employeeId, o.leaveTypeId);
+    const cur = openingAsOf.get(k);
+    if (!cur || (o.openingSeq ?? 0) > cur.seq) openingAsOf.set(k, { seq: o.openingSeq ?? 0, asOf: +new Date(o.asOf) });
+  }
   // Their live leave over the whole span the file covers - what an imported leave must not land on.
   const starts = items.map((i) => dayMs(i.start_date)).filter((n) => !Number.isNaN(n));
   const ends = items.map((i) => dayMs(i.end_date)).filter((n) => !Number.isNaN(n));
@@ -153,12 +170,14 @@ export async function importLeaveHistory(deps: Deps, actor: AppUser, items: Hist
     const endSession = item.end_session === 1 ? 1 : 2;
     if (start === end && startSession > endSession) { fail("the start session must be on or before the end session"); continue; }
     const trackedMs = +new Date(emp.trackedFrom);
-    const trackedYmd = utcDay(trackedMs);
-    if (start < trackedMs && end >= trackedMs) {
-      fail(`runs across the day HRMS records start (${trackedYmd}) - split it there: the days before are history, the days from then on are booked leave`);
+    const sheet = openingAsOf.get(balanceKey(emp.uuid, lt.uuid));
+    const splitMs = sheet?.asOf ?? trackedMs;
+    if (start < splitMs && end >= splitMs) {
+      const day = sheet ? `the date of the opening balance sheet (${utcDay(splitMs)})` : `the day HRMS records start (${utcDay(splitMs)})`;
+      fail(`runs across ${day} - split it there: the days before are history, the days from then on are booked leave`);
       continue;
     }
-    const kind: HistoryKind = start >= trackedMs ? "booked" : "history";
+    const kind: HistoryKind = start >= splitMs ? "booked" : "history";
     if (emp.startDate && start < +new Date(emp.startDate)) { fail(`starts before this person joined (${utcDay(+new Date(emp.startDate))})`); continue; }
     if (kind === "booked" && emp.endDate && end > +new Date(emp.endDate)) { fail(`runs past this person's last day (${utcDay(+new Date(emp.endDate))})`); continue; }
 
@@ -209,7 +228,7 @@ export async function importLeaveHistory(deps: Deps, actor: AppUser, items: Hist
 
     planned.set(emp.uuid, [...(planned.get(emp.uuid) ?? []), { start: startSlot, end: endSlot }]);
     results.push({ ...base, kind, days, days_from });
-    plans.push({ index: results.length - 1, kind, employeeId: emp.uuid, employeeCode: emp.code, leaveTypeId: lt.uuid, paid: lt.paid, start, end, startSession, endSession, days, reason, balance });
+    plans.push({ index: results.length - 1, kind, employeeId: emp.uuid, employeeCode: emp.code, leaveTypeId: lt.uuid, paid: lt.paid, start, end, startSession, endSession, days, reason, balance, trackedMs });
   }
 
   if (!dryRun && plans.length) {
@@ -354,14 +373,14 @@ async function writeHistory(deps: Deps, actor: AppUser, group: Plan[], results: 
   })));
   // Unpaid leave is docked, including before HRMS records start (domain/attendance.ts isUntracked), so a closed
   // period it falls in is restated the way an approval would restate it. Paid leave excuses days: before the
-  // records start they owe nothing anyway, and booked paid leave lies ahead of any closed period. Once per
-  // (person, pay period), found from the cached period list - a restatement is about the whole period, and
-  // walking every day of years of history one query at a time would spend the invocation on periods that mostly
-  // do not exist (HRMS ran no payroll before go-live).
+  // records start they owe nothing anyway, but from then on a closed period may have docked them (history from a
+  // sheet dated after the records start, or booked leave). Once per (person, pay period), found from the cached
+  // period list - a restatement is about the whole period, and walking every day of years of history one query
+  // at a time would spend the invocation on periods that mostly do not exist (HRMS ran no payroll before go-live).
   const periods = await refPayPeriods(deps);
   const restate = new Map<string, { employeeId: string; dayMs: number }>();
   for (const { plan: p } of landed) {
-    if (p.paid) continue;
+    if (p.paid && p.end < p.trackedMs) continue;
     for (const pp of periods) {
       const from = +new Date(pp.periodStart);
       const to = +new Date(pp.periodEnd);

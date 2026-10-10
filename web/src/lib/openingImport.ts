@@ -112,7 +112,7 @@ export function parseOpenings(text: string, employees: ImportEmployee[], leaveTy
     out.name = `${emp.first_name ?? ""} ${emp.last_name ?? ""}`.trim() || key;
     if (seen.has(emp.path)) { out.errors.push("This person is on an earlier line too."); return out; }
     seen.add(emp.path);
-    if (!emp.tracked_from) out.errors.push("HRMS records start is not set for this person yet - set it first; the opening is as of that day.");
+    if (!emp.tracked_from) out.errors.push("HRMS records start is not set for this person yet - set it first; HRMS accrual for this person counts from that day.");
     const encashedByType = new Map<string, number | null>();
     columns.forEach((c, i) => {
       if (c?.kind !== "encashed") return;

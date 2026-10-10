@@ -4374,9 +4374,9 @@ components:
         kind: { type: string, readOnly: true, enum: [opening, correction] }
         days: { type: number, description: "The signed change to the balance. On create, the days to add (positive) or take off (negative); not zero, and never taking the balance below zero." }
         opening_days: { type: number, readOnly: true, description: "Opening only: the balance entered, as of `as_of`." }
-        removed_days: { type: number, readOnly: true, description: "Opening only: what HRMS had credited for the accrual periods before `as_of`, taken off by the first opening for this balance (0 on a re-import, which moves the balance by the difference from the previous opening)." }
+        removed_days: { type: number, readOnly: true, description: "Opening only: what HRMS had credited for the accrual periods before the employee's records start, taken off by the first opening for this balance (0 on a re-import, which moves the balance by the difference from what earlier openings put on)." }
         encashed_days: { type: number, readOnly: true, description: "Opening only: days already encashed that leave year before HRMS, counted against the annual encashment cap." }
-        as_of: { type: string, format: date, readOnly: true, description: "Opening only: the employee's tracked_from the opening was measured against." }
+        as_of: { type: string, format: date, readOnly: true, description: "Opening only: the day the old system's sheet was as of (the employee's tracked_from when none was given)." }
         reason: { type: string, description: "Why the balance moved. Required on create." }
         access:
           readOnly: true
@@ -13123,13 +13123,14 @@ paths:
   /v1/leave-requests:importHistory:
     post:
       description: >-
-        Custom method importHistory: bring in leave from the system before HRMS. The employee's HRMS records start
-        (`employees.tracked_from`, which must be set) decides what each item is. HISTORY - leave that ends before
-        that day - lands as approved leave with source import: it counts toward quotas, lifetime limits and the
-        probation cap, and moves no balance (the opening balance already has it taken off). BOOKED - leave the old
-        system had approved for dates from that day on - lands as an ordinary approved request that takes its
-        days off the balance once (so the opening is the balance before the old system deducted it), refused
-        when a paid type's balance cannot hold it. An item that runs across the day is refused: split it there.
+        Custom method importHistory: bring in leave from the system before HRMS. The day the balance's opening is
+        as of (the date of the old system's sheet, leave-adjustments:importOpenings) - or, before one is entered,
+        the employee's HRMS records start (`employees.tracked_from`, which must be set) - decides what each item
+        is. HISTORY - leave that starts before that day - lands as approved leave with source import: it counts
+        toward quotas, lifetime limits and the probation cap, and moves no balance (the opening balance already has
+        it taken off). BOOKED - leave from that day on - lands as an ordinary approved request that takes its days
+        off the balance once (so the opening is the balance before the old system deducted it), refused when a
+        paid type's balance cannot hold it. An item that runs across the day is refused: split it there.
         Items must start on or after the employee's start date and may not overlap leave already in HRMS or
         another item in the same call. `days` comes from the item when given, and is otherwise counted the way a
         request filed now would be. Nobody is notified and no event is emitted. Re-importing a leave already here
@@ -13192,7 +13193,7 @@ paths:
                         end_date: { type: string, format: date }
                         days: { type: number }
                         days_from: { type: string, enum: [file, counted] }
-                        kind: { type: string, enum: [history, booked], description: "history: taken before the records start, moves no balance. booked: from the records start on, takes its days off the balance." }
+                        kind: { type: string, enum: [history, booked], description: "history: starts before the opening sheet's date (or the records start), moves no balance. booked: from that day on, takes its days off the balance." }
                         outcome: { type: string, enum: [created, unchanged, error] }
                         error: { type: string }
         '400': { $ref: '#/components/responses/Problem' }
@@ -15998,10 +15999,13 @@ paths:
     post:
       description: >-
         Custom method importOpenings: bring in opening leave balances from before HRMS - for each employee and
-        leave type, the balance they had when their HRMS records started (`employees.tracked_from`, which must be
-        set). A first opening takes off what HRMS credited for the accrual periods before that day and puts on the
-        balance given; a re-import moves the balance by the difference from the previous opening only, so
-        applying the same file twice changes nothing. Everything that happened in HRMS since stays where it is.
+        leave type, the balance they had on the day the old system's sheet was made (`as_of`; the records start,
+        `employees.tracked_from`, when absent - it must be set either way). An opening takes off what HRMS
+        credited for the accrual periods before the sheet's date and puts on the balance given; for a sheet dated
+        before the records start it also puts on the policy's accrual in between and takes off leave brought in
+        as history that started after the sheet. Leave HRMS holds (pending and approved requests) stays taken off,
+        so the result is what the person has left. A re-import moves the balance by the difference from what
+        earlier openings put on, so applying the same file twice changes nothing.
         By default (and whenever `dry_run` is not false) this reports what each balance would become and writes
         nothing. Each item stands alone: one that cannot be applied is reported with its reason and the rest go
         ahead. Up to 100 items per call.
@@ -16024,8 +16028,9 @@ paths:
                     properties:
                       employee: { type: string, description: "Resource path: employees/{employee_id}" }
                       leave_type: { type: string, description: "Resource path: leave-types/{leave_type_id}" }
-                      opening_days: { type: number, description: "The balance on the day HRMS records start, as the system before had it: what they had earned under your leave policy up to then, less what they had used." }
+                      opening_days: { type: number, description: "The balance on `as_of`, as the system before had it: what they had earned under your leave policy up to then, less what they had used." }
                       encashed_days: { type: number, nullable: true, description: "Days already encashed that leave year before HRMS, so the annual encashment cap counts them." }
+                      as_of: { type: string, format: date, nullable: true, description: "The day the sheet's balance is as of: in this leave year (unless it is the records start), not in the future, not before the person joined. Accrual periods starting before it are the sheet's; from it on, HRMS's. Omitted: the records start." }
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/PermissionDenied' }
@@ -16054,13 +16059,18 @@ paths:
                       properties:
                         employee: { type: string }
                         leave_type: { type: string }
-                        as_of: { type: string, format: date }
+                        as_of: { type: string, format: date, description: "The day the sheet's balance is as of." }
+                        records_from: { type: string, format: date, description: "The day HRMS records start for the employee." }
                         current: { type: number, description: "The balance now." }
-                        removed: { type: number, description: "What HRMS credited before `as_of`, taken off by a first opening." }
                         previous_opening: { type: number, description: "The last opening entered for this balance, on a re-import." }
                         opening: { type: number }
+                        earned: { type: number, description: "HRMS accrual for the periods from `as_of` on, up to the last one credited." }
+                        leave_pending: { type: number, description: "Days of pending requests filed in HRMS, held against the balance." }
+                        leave_approved: { type: number, description: "Days of approved requests filed in HRMS (and booked leave brought in), held against the balance." }
+                        leave_history: { type: number, description: "Days of leave brought in as history that started on or after `as_of`, so not in the sheet." }
+                        other: { type: number, description: "Every other movement since: corrections, encashments, the year-end carry-forward." }
                         change: { type: number, description: "The signed change to the balance." }
-                        result: { type: number, description: "The balance after." }
+                        result: { type: number, description: "The balance after: opening + earned - leave_pending - leave_approved - leave_history + other." }
                         outcome: { type: string, enum: [applied, unchanged, error] }
                         error: { type: string }
         '400': { $ref: '#/components/responses/Problem' }

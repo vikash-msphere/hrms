@@ -417,14 +417,38 @@ export function creditedBeforeFloor(i: AccrualInputs): number {
  */
 export function openingMarker(i: AccrualInputs): string | null {
   if (!i.startMs || !i.lastAccrualYm || isFinalMarker(i.lastAccrualYm)) return null;
+  const before = floorMarker(i);
+  if (before === null) return null;
+  const at = i.frequency === "semi_monthly" ? halfMarkerToIndex(i.lastAccrualYm) : ymIndex(i.lastAccrualYm);
+  const floorLast = i.frequency === "semi_monthly" ? halfMarkerToIndex(before) : ymIndex(before);
+  return at >= floorLast ? null : before;
+}
+
+/** The marker of the last period before the floor (see floorMs), or null when there is no floor. */
+export function floorMarker(i: AccrualInputs): string | null {
   if (i.frequency === "semi_monthly") {
     const floorIdx = floorHalfIdx(i);
-    if (floorIdx === null || halfMarkerToIndex(i.lastAccrualYm) >= floorIdx - 1) return null;
-    return halfMarker(floorIdx - 1);
+    return floorIdx === null ? null : halfMarker(floorIdx - 1);
   }
   const floorIdx = floorMonthIdx(i);
-  if (floorIdx === null || ymIndex(i.lastAccrualYm) >= floorIdx - 1) return null;
-  return ymFromIndex(floorIdx - 1);
+  return floorIdx === null ? null : ymFromIndex(floorIdx - 1);
+}
+
+/**
+ * What the leave policy grants for the periods before the floor at `floorMs` (see floorMs): every period from
+ * the joining one, priced against the employment window as it reads now, whether HRMS credited it or not. With
+ * `through` (an accrual marker) it stops at that period instead, which is how a caller asks for only the
+ * periods the walk has reached. Zero when `floorMs` is on or before the start date.
+ *
+ * An opening balance as of a day other than the records start reads this twice (services/leaveAdjustments.ts):
+ * the difference between two floors is the entitlement between two days, which is what a sheet dated before
+ * the records start is missing and what one dated after them already has.
+ */
+export function entitlementBefore(i: AccrualInputs, floorMs: number, through?: string | null): number {
+  const at = { ...i, floorMs };
+  const last = through === undefined ? floorMarker(at) : through;
+  if (!last) return 0;
+  return creditedBeforeFloor({ ...at, lastAccrualYm: last, pricedStartMs: i.startMs, pricedEndMs: i.endMs });
 }
 
 // The recorded window the pre-floor periods were priced against, with the marker's fallback for a balance
