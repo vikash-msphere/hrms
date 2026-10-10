@@ -10,10 +10,10 @@ import type { Bindings, AppUser } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
 import {
-  createExpense, submitExpense, approveExpense, rejectExpense, cancelExpense, payExpense, listExpenses,
+  createExpense, submitExpense, approveExpense, rejectExpense, cancelExpense, payExpense, listExpenses, settledExpenseIds,
 } from "../src/services/expenses";
 import type { ListScope } from "../src/domain/access";
-import { approvedUnpaidReimbursements } from "../src/services/reimbursements";
+import { approvedUnpaidReimbursements, cancelReimbursement } from "../src/services/reimbursements";
 import { grantFor } from "../bootstrap/authz/grants";
 import { DEFAULT_POLICY } from "../bootstrap/authz/policy";
 
@@ -107,14 +107,64 @@ describe("expenses workflow", () => {
     expect(submitted.state).toBe("APPROVED"); // slid straight through
   });
 
-  it("rejects only submitted expenses and cancels only draft/submitted", async () => {
+  it("withdraws an approved expense until its money moves, taking its unpaid payroll claim with it", async () => {
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    const cat = await seedCategory("Travel");
+    const reimbOf = async (id: string) => (await deps.db.select().from(schema.reimbursements).where(eq(schema.reimbursements.uuid, id)))[0]!;
+
+    // Out-of-band, not paid yet: cancellable, and a paid one is not.
+    const vendorBill = await createExpense(deps, actor, { category: cat, amount: 1200 });
+    await submitExpense(deps, actor, vendorBill.uuid);
+    await approveExpense(deps, actor, vendorBill.uuid);
+    expect(await settledExpenseIds(deps, [{ uuid: vendorBill.uuid, state: "APPROVED" }])).toEqual(new Set());
+    expect((await cancelExpense(deps, actor, vendorBill.uuid)).state).toBe("CANCELLED");
+    const paid = await createExpense(deps, actor, { category: cat, amount: 1300 });
+    await submitExpense(deps, actor, paid.uuid);
+    await approveExpense(deps, actor, paid.uuid);
+    await payExpense(deps, actor, paid.uuid);
+    await expect(cancelExpense(deps, actor, paid.uuid)).rejects.toThrow(/only draft, submitted or unpaid approved/);
+
+    // Employee-fronted: the expense and the payroll claim it created go together, from either end.
+    const fronted = await createExpense(deps, actor, { category: cat, amount: 2500, reimbursable: true, description: "Taxi" });
+    await submitExpense(deps, actor, fronted.uuid);
+    const approved = await approveExpense(deps, actor, fronted.uuid);
+    expect((await cancelExpense(deps, actor, fronted.uuid)).state).toBe("CANCELLED");
+    expect((await reimbOf(approved.reimbursementId!)).state).toBe("CANCELLED");
+    expect((await approvedUnpaidReimbursements(deps, emp)).map((r) => r.uuid)).not.toContain(approved.reimbursementId);
+
+    const fromClaim = await createExpense(deps, actor, { category: cat, amount: 2600, reimbursable: true, description: "Hotel" });
+    await submitExpense(deps, actor, fromClaim.uuid);
+    const viaClaim = await approveExpense(deps, actor, fromClaim.uuid);
+    expect((await cancelReimbursement(deps, actor, viaClaim.reimbursementId!)).state).toBe("CANCELLED");
+    expect((await deps.db.select().from(schema.expenses).where(eq(schema.expenses.uuid, fromClaim.uuid)))[0]!.state).toBe("CANCELLED");
+
+    // Once payroll has paid the claim, neither end can be withdrawn - and the list says so before anybody tries.
+    const settled = await createExpense(deps, actor, { category: cat, amount: 2700, reimbursable: true, description: "Flight" });
+    await submitExpense(deps, actor, settled.uuid);
+    const paidOut = await approveExpense(deps, actor, settled.uuid);
+    await deps.db.update(schema.reimbursements).set({ state: "PAID", paidAt: new Date() }).where(eq(schema.reimbursements.uuid, paidOut.reimbursementId!));
+    expect(await settledExpenseIds(deps, [{ uuid: settled.uuid, state: "APPROVED" }])).toEqual(new Set([settled.uuid]));
+    await expect(cancelExpense(deps, actor, settled.uuid)).rejects.toThrow(/already been paid/);
+    expect((await deps.db.select().from(schema.expenses).where(eq(schema.expenses.uuid, settled.uuid)))[0]!.state).toBe("APPROVED");
+    expect((await reimbOf(paidOut.reimbursementId!)).state).toBe("PAID");
+
+    // A company card charge matched to it means the money is spent.
+    const onCard = await createExpense(deps, actor, { category: cat, amount: 800 });
+    await submitExpense(deps, actor, onCard.uuid);
+    await approveExpense(deps, actor, onCard.uuid);
+    await deps.db.insert(schema.cardTransactions).values({ uuid: genId(), code: short("ct"), postedOn: new Date(), amount: 800, importKey: genId(), expenseId: onCard.uuid });
+    await expect(cancelExpense(deps, actor, onCard.uuid)).rejects.toThrow(/card charge/);
+  });
+
+  it("rejects only submitted expenses, and a cancelled one stays cancelled", async () => {
     const emp = await seedEmployee();
     const actor = await seedActor(emp);
     const cat = await seedCategory();
 
     const e = await createExpense(deps, actor, { category: cat, amount: 900 });
     // Cannot reject a DRAFT.
-    await expect(rejectExpense(deps, actor, e.uuid)).rejects.toThrow();
+    await expect(rejectExpense(deps, actor, e.uuid, "Wrong category")).rejects.toThrow();
     // Can cancel a DRAFT.
     const cancelled = await cancelExpense(deps, actor, e.uuid);
     expect(cancelled.state).toBe("CANCELLED");
@@ -123,7 +173,7 @@ describe("expenses workflow", () => {
 
     const e2 = await createExpense(deps, actor, { category: cat, amount: 900 });
     await submitExpense(deps, actor, e2.uuid);
-    const rejected = await rejectExpense(deps, actor, e2.uuid);
+    const rejected = await rejectExpense(deps, actor, e2.uuid, "Wrong category");
     expect(rejected.state).toBe("REJECTED");
   });
 
@@ -139,10 +189,11 @@ describe("expenses workflow", () => {
     const notes = await deps.db.select().from(schema.notifications);
     expect(notes.some((n) => n.type === "expense.rejected" && (n.body ?? "").includes("Missing the vendor invoice"))).toBe(true);
 
-    // An empty reason is stored as absent, not as an empty string.
+    // A blank reason is refused, and the expense stays submitted.
     const e2 = await createExpense(deps, actor, { category: cat, amount: 100 });
     await submitExpense(deps, actor, e2.uuid);
-    expect((await rejectExpense(deps, actor, e2.uuid, "   ")).decisionNote).toBeNull();
+    await expect(rejectExpense(deps, actor, e2.uuid, "   ")).rejects.toThrow(/say why/);
+    expect((await deps.db.select().from(schema.expenses).where(eq(schema.expenses.uuid, e2.uuid)))[0]!.state).toBe("SUBMITTED");
   });
 
   it("bridges a reimbursable expense to an APPROVED reimbursement on the payroll queue, and refuses :pay", async () => {

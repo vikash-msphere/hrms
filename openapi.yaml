@@ -751,6 +751,7 @@ components:
         prior_employer_income_effective: { type: number, readOnly: true, description: Verified prior-employer income actually fed into the projection (0 unless verified). }
         prior_employer_tds_effective: { type: number, readOnly: true, description: Verified prior-employer TDS actually credited toward collection (0 unless verified). }
         verification_status: { type: string, readOnly: true, nullable: true, enum: [DECLARED, VERIFIED, REJECTED], description: Verification state of the declared prior-employer figures; null when nothing is declared. }
+        rejection_reason: { type: string, readOnly: true, nullable: true, description: "Why HR/payroll rejected the declaration (required with action reject). Null unless verification_status is REJECTED." }
         verified_income: { type: number, readOnly: true, nullable: true, description: HR/payroll-accepted prior-employer income. }
         verified_tds: { type: number, readOnly: true, nullable: true, description: HR/payroll-accepted prior-employer TDS. }
         values:
@@ -759,7 +760,8 @@ components:
           description: >-
             Write body. To DECLARE (owner or HR on behalf): prior_employer_income, prior_employer_tds, assessment_year.
             To VERIFY/REJECT (HR/payroll, and not the subject employee): action=verify|reject, with optional
-            verified_income/verified_tds overrides on verify. Only VERIFIED figures affect withholding.
+            verified_income/verified_tds overrides on verify and a required reason (1-1000 characters) on reject.
+            Only VERIFIED figures affect withholding.
       x-aep-resource:
         singular: tax
         plural: taxes
@@ -1969,6 +1971,7 @@ components:
         amount: { type: number, readOnly: true, description: Payout amount (days x rate_per_day). }
         currency_code: { type: string, readOnly: true }
         state: { type: string, readOnly: true, description: State value PENDING/APPROVED/REJECTED/CANCELLED/PAID. }
+        decision_note: { type: string, readOnly: true, description: "Why it was rejected (required by :reject). Absent unless rejected." }
         paid_run: { type: string, readOnly: true, description: "Resource path of the payroll run that paid it." }
         paid_time: { type: string, format: date-time, readOnly: true }
         access: { readOnly: true, $ref: '#/components/schemas/access_hint' }
@@ -2031,6 +2034,7 @@ components:
         reason: { type: string }
         state: { type: string, readOnly: true, description: State value PENDING/APPROVED/REJECTED/CANCELLED. }
         decided_by: { type: string, readOnly: true, description: "Resource path: users/{user_id}. Who approved or rejected the request." }
+        decision_note: { type: string, readOnly: true, description: "Why it was rejected (required by :reject). Absent unless rejected." }
         access: { readOnly: true, $ref: '#/components/schemas/access_hint' }
       x-aep-resource:
         singular: attendance-regularization
@@ -2059,7 +2063,7 @@ components:
         type: hrms.example.com/attendance-day-mark
     overtime-request:
       type: object
-      description: An employee's request logging overtime hours for a day; a manager (own dept) or HR approves/rejects, the owner can cancel while pending.
+      description: An employee's request logging overtime hours for a day; a manager (own dept) or HR approves/rejects, the owner can cancel while pending or approved-and-unpaid.
       required: [path, create_time, update_time, etag, date, minutes, state, paid]
       properties:
         path: { type: string, readOnly: true }
@@ -2075,7 +2079,7 @@ components:
         state: { type: string, readOnly: true, description: State value PENDING/APPROVED/REJECTED/CANCELLED. }
         decided_by: { type: string, readOnly: true, description: "Resource path: users/{user_id}. Who approved or rejected the request." }
         decision_note: { type: string, readOnly: true }
-        paid: { type: boolean, readOnly: true, description: "Whether a payroll run has paid this overtime (opt-in via settings/overtime)." }
+        paid: { type: boolean, readOnly: true, description: "Whether a payroll run, or an exit settlement, has paid this overtime (opt-in via settings/overtime)." }
         paid_run: { type: string, readOnly: true, description: "payroll-runs/{id} that paid it." }
         access: { readOnly: true, $ref: '#/components/schemas/access_hint' }
       x-aep-resource:
@@ -2085,7 +2089,7 @@ components:
         type: hrms.example.com/overtime-request
     remote-work-request:
       type: object
-      description: An employee's request to work remotely over a date range; a manager (own dept) or HR approves/rejects, the owner can cancel while pending. Does not consume leave.
+      description: An employee's request to work remotely over a date range; a manager (own dept) or HR approves/rejects, the owner can cancel while pending, or once approved until it starts. Does not consume leave.
       required: [path, create_time, update_time, etag, days, state]
       properties:
         path: { type: string, readOnly: true }
@@ -2113,7 +2117,8 @@ components:
       type: object
       description: >-
         An employee's request to arrive late or leave early on one working day. A manager (own dept) or HR
-        approves or rejects it, and the owner can cancel it while it is pending. An approved request moves that
+        approves or rejects it, and the owner can cancel it while it is pending, or once approved until its day is
+        over. An approved request moves that
         day's shift start (late arrival) or end (early departure) to the requested time; what else it does to the
         day and to pay is the org's policy in settings/punctuality.
       required: [path, create_time, update_time, etag, minutes, state, over_limit, auto_approved]
@@ -2290,6 +2295,7 @@ components:
         end_session: { type: integer, enum: [1, 2], description: "Session the leave ends on the end date: 1 = first half (morning), 2 = second half (afternoon). Default 2." }
         days: { type: number, readOnly: true }
         state: { type: string, readOnly: true, description: State value PENDING/APPROVED/REJECTED/CANCELLED. }
+        decision_note: { type: string, readOnly: true, description: "Why it was rejected (required by :reject). Absent unless rejected." }
         source: { type: string, readOnly: true, enum: [app, import], description: "app for leave filed in HRMS; import for leave taken before HRMS and brought in as history (leave-requests:importHistory). Imported leave counts toward the leave policy but never moved the balance, so cancelling it refunds nothing." }
         reason: { type: string }
         has_document: { type: boolean, readOnly: true, description: "Whether a supporting file (sick note, travel document) is attached to this request." }
@@ -2494,7 +2500,7 @@ components:
               commitment: { type: boolean, description: "Entering this column commits the work and starts lead time." }
               delivery: { type: boolean, description: "Entering this column delivers the work and ends lead/cycle time." }
               allowCreate: { type: boolean, description: "New tasks may be created straight into this column. Off unless set; at least one column must allow it, and the first that does is where a task created without a column_key lands. Other columns are reached by moving a task." }
-        swimlane_mode: { type: string, enum: [none, assignee, goal, priority, department, custom] }
+        swimlane_mode: { type: string, enum: [none, assignee, goal, priority, task_type, department, custom] }
         no_lane_label: { type: string, description: "Custom mode: label for the catch-all bucket (default \"No lane\")." }
         hide_empty_lanes: { type: boolean, description: "Board view: hide swimlanes that have no visible cards." }
         reassign_lane_on_move: { type: boolean, description: "Board view: a cross-lane drop reassigns the card's swimlane. Off = lanes are locked and cross-lane drops are rejected." }
@@ -2516,6 +2522,18 @@ components:
               key: { type: string }
               label: { type: string }
               color: { type: string }
+        task_types:
+          type: array
+          description: "Task-type catalog {key,label,color,icon}: what kind of work a task is (bug, feature, chore). A card names one key in `task_type`. A new board created without one gets a starter catalog; set it through `configure`."
+          items:
+            type: object
+            required: [key, label]
+            properties:
+              key: { type: string }
+              label: { type: string }
+              color: { type: string }
+              icon: { type: string, description: "Names one of the app's task-type glyphs (feature, bug, improvement, chore, debt, task, story, epic, spike, docs, test, design, support); an unknown name draws a plain dot." }
+        task_type_display: { type: string, enum: [icon, label, both], description: "How a task tile shows its type: the glyph, the type's name, or both. Defaults to icon; set it through `configure`." }
         card_count: { type: integer, readOnly: true }
         access:
           readOnly: true
@@ -2571,6 +2589,7 @@ components:
             never editable afterwards, because a reporter is a fact about the past. Null when the task was
             filed by a login with no employee record. Filing a task also makes the reporter a watcher of it.
         priority: { type: string, enum: [low, medium, high, urgent] }
+        task_type: { type: string, nullable: true, description: "A key from the board's `task_types` catalog (what kind of work this is). A write naming a key the board does not offer is 400; null or absent = untyped." }
         labels: { type: array, items: { type: string }, description: "Label keys from the board's label catalog." }
         documents: { type: array, items: { type: string }, description: "Linked documents, as resource paths: org-documents/{document_id}. Link-only (the card owns no storage); a write replaces the whole set." }
         size: { type: integer, nullable: true, description: "Estimate / story points. Null clears the estimate - there is no empty-string form for an integer, so this is how the task editor un-estimates a card (same shape as the move verb's nullable to_sprint / to_department)." }
@@ -3372,6 +3391,7 @@ components:
         description: { type: string }
         billable: { type: boolean }
         status: { type: string, readOnly: true, enum: [DRAFT, SUBMITTED, APPROVED, REJECTED], description: "DRAFT, SUBMITTED, APPROVED, or REJECTED." }
+        decision_note: { type: string, readOnly: true, description: "Why the entry was rejected (required by :reject). Absent unless the last decision rejected it." }
         access: { readOnly: true, $ref: '#/components/schemas/access_hint' }
       x-aep-resource:
         singular: time-entry
@@ -3402,6 +3422,7 @@ components:
         reason: { type: string }
         start_date: { type: string, format: date, description: "First recovery month." }
         status: { type: string, readOnly: true, enum: [PENDING, APPROVED, DISBURSED, CLOSED, REJECTED], description: "PENDING, APPROVED, DISBURSED, CLOSED, or REJECTED." }
+        decision_note: { type: string, readOnly: true, description: "Why it was rejected (required by :reject). Absent unless rejected." }
         access: { readOnly: true, $ref: '#/components/schemas/access_hint' }
       x-aep-resource:
         singular: loan
@@ -3430,6 +3451,7 @@ components:
         verified_amount: { type: number, readOnly: true, description: "Amount payroll/HR accepted." }
         status: { type: string, readOnly: true, enum: [DECLARED, VERIFIED, REJECTED], description: "DECLARED, VERIFIED, or REJECTED." }
         note: { type: string, nullable: true, description: "Free note from the declarant. Null when there is none." }
+        decision_note: { type: string, readOnly: true, description: "The verifier's reason for rejecting it (required by :reject). Absent unless rejected." }
         has_proof: { type: boolean, readOnly: true, description: "Whether a proof document is attached." }
         access: { readOnly: true, $ref: '#/components/schemas/access_hint' }
       x-aep-resource:
@@ -3546,6 +3568,7 @@ components:
         incurred_on: { type: string, format: date }
         description: { type: string }
         state: { type: string, readOnly: true, description: State value PENDING/APPROVED/REJECTED/CANCELLED/PAID. }
+        decision_note: { type: string, readOnly: true, description: "Why it was rejected (required by :reject). Absent unless rejected." }
         advance:
           type: string
           nullable: true
@@ -3683,6 +3706,7 @@ components:
         state: { type: string, readOnly: true, description: State value DRAFT/SUBMITTED/APPROVED/REJECTED/CANCELLED/PAID. }
         reimbursable: { type: boolean, description: "True when an employee fronted the cost; on approval a reimbursement is created and paid via payroll." }
         reimbursement: { type: string, readOnly: true, description: "Resource path of the linked reimbursement, when bridged to payroll." }
+        settled: { type: boolean, readOnly: true, description: "On an APPROVED expense only: whether its money has already moved - the payroll payout was paid, or a company card charge is matched to it. A settled expense cannot be cancelled." }
         signals:
           type: array
           readOnly: true
@@ -5044,6 +5068,19 @@ components:
         API key, as `Authorization: Bearer hrms_<prefix>_<secret>`. The machine lane. A request carrying an
         `hrms_`-shaped bearer is ALWAYS resolved as that key: it never falls back to the browser lanes, so an
         invalid key is a 401 rather than a silent downgrade to the caller's session.
+  requestBodies:
+    # A verb body, not a resource, so it lives here rather than under `schemas` (whose entries are resources).
+    RejectBody:
+      description: The body of every request `:reject`. The reason is required, stored on the row as `decision_note` and sent to the requester.
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [reason]
+            properties:
+              reason: { type: string, minLength: 1, maxLength: 1000, description: "Why it was rejected. Surrounding whitespace is trimmed, and a blank reason is refused." }
   responses:
     Problem:
       description: Error
@@ -8172,6 +8209,7 @@ paths:
                 to_assignee: { type: string, nullable: true }
                 to_goal: { type: string, nullable: true }
                 to_priority: { type: string, nullable: true }
+                to_task_type: { type: string, nullable: true, description: "Task-type swimlane drop: a key from the board's task_types, or null for the untyped lane. Absent leaves the type alone." }
                 to_department: { type: string, nullable: true }
                 to_sprint: { type: string, nullable: true }
       responses:
@@ -10646,6 +10684,7 @@ paths:
       description: "Custom method reject: reject a submitted entry (-> REJECTED)."
       operationId: ":RejectTimeEntry"
       parameters: [ { in: path, name: entry_id, required: true, schema: { type: string } } ]
+      requestBody: { $ref: '#/components/requestBodies/RejectBody' }
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/PermissionDenied' }
@@ -10767,6 +10806,7 @@ paths:
       description: "Custom method reject: reject a pending loan."
       operationId: ":RejectLoan"
       parameters: [ { in: path, name: loan_id, required: true, schema: { type: string } } ]
+      requestBody: { $ref: '#/components/requestBodies/RejectBody' }
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/PermissionDenied' }
@@ -10940,6 +10980,7 @@ paths:
       description: "Custom method reject: reject a declaration."
       operationId: ":RejectTaxDeclaration"
       parameters: [ { in: path, name: decl_id, required: true, schema: { type: string } } ]
+      requestBody: { $ref: '#/components/requestBodies/RejectBody' }
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/PermissionDenied' }
@@ -11897,6 +11938,7 @@ paths:
       description: "Custom method reject for leave-encashment."
       operationId: ":RejectLeaveEncashment"
       parameters: [ { in: path, name: leave_encashment_id, required: true, schema: { type: string } } ]
+      requestBody: { $ref: '#/components/requestBodies/RejectBody' }
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/PermissionDenied' }
@@ -12152,6 +12194,7 @@ paths:
       description: "Custom method reject for attendance-regularization."
       operationId: ":RejectAttendanceRegularization"
       parameters: [ { in: path, name: attendance_regularization_id, required: true, schema: { type: string } } ]
+      requestBody: { $ref: '#/components/requestBodies/RejectBody' }
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/PermissionDenied' }
@@ -12254,14 +12297,7 @@ paths:
       description: "Custom method reject for overtime-request."
       operationId: ":RejectOvertimeRequest"
       parameters: [ { in: path, name: overtime_request_id, required: true, schema: { type: string } } ]
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                note: { type: string, description: "Why it was rejected; relayed to the requester with the decision." }
+      requestBody: { $ref: '#/components/requestBodies/RejectBody' }
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/PermissionDenied' }
@@ -12273,7 +12309,7 @@ paths:
         '500': { $ref: '#/components/responses/Problem' }
   /v1/overtime-requests/{overtime_request_id}:cancel:
     post:
-      description: "Custom method cancel for overtime-request."
+      description: "Custom method cancel for overtime-request: withdraws a pending request, or an approved one no payroll run or exit settlement has paid yet."
       operationId: ":CancelOvertimeRequest"
       parameters: [ { in: path, name: overtime_request_id, required: true, schema: { type: string } } ]
       responses:
@@ -12366,14 +12402,7 @@ paths:
       description: "Custom method reject for remote-work-request."
       operationId: ":RejectRemoteWorkRequest"
       parameters: [ { in: path, name: remote_work_request_id, required: true, schema: { type: string } } ]
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                note: { type: string, description: "Why it was rejected; relayed to the requester with the decision." }
+      requestBody: { $ref: '#/components/requestBodies/RejectBody' }
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/PermissionDenied' }
@@ -12385,7 +12414,7 @@ paths:
         '500': { $ref: '#/components/responses/Problem' }
   /v1/remote-work-requests/{remote_work_request_id}:cancel:
     post:
-      description: "Custom method cancel for remote-work-request."
+      description: "Custom method cancel for remote-work-request: withdraws a pending request, or an approved one before its start date (org-local)."
       operationId: ":CancelRemoteWorkRequest"
       parameters: [ { in: path, name: remote_work_request_id, required: true, schema: { type: string } } ]
       responses:
@@ -12482,14 +12511,7 @@ paths:
       description: "Custom method reject for late-early-request."
       operationId: ":RejectLateEarlyRequest"
       parameters: [ { in: path, name: late_early_request_id, required: true, schema: { type: string } } ]
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                note: { type: string, description: "Why it was rejected; relayed to the requester with the decision." }
+      requestBody: { $ref: '#/components/requestBodies/RejectBody' }
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/PermissionDenied' }
@@ -12501,7 +12523,7 @@ paths:
         '500': { $ref: '#/components/responses/Problem' }
   /v1/late-early-requests/{late_early_request_id}:cancel:
     post:
-      description: "Custom method cancel for late-early-request."
+      description: "Custom method cancel for late-early-request: withdraws a pending request, or an approved one (auto-approved included) for today or a later day (org-local). A day that is over keeps its decision."
       operationId: ":CancelLateEarlyRequest"
       parameters: [ { in: path, name: late_early_request_id, required: true, schema: { type: string } } ]
       responses:
@@ -12589,14 +12611,7 @@ paths:
       description: "Custom method reject for asset-request."
       operationId: ":RejectAssetRequest"
       parameters: [ { in: path, name: asset_request_id, required: true, schema: { type: string } } ]
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                note: { type: string, description: "Why it was rejected; relayed to the requester with the decision." }
+      requestBody: { $ref: '#/components/requestBodies/RejectBody' }
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/PermissionDenied' }
@@ -12608,7 +12623,7 @@ paths:
         '500': { $ref: '#/components/responses/Problem' }
   /v1/asset-requests/{asset_request_id}:cancel:
     post:
-      description: "Custom method cancel for asset-request."
+      description: "Custom method cancel for asset-request: withdraws a pending request, or an approved one nothing has been issued against yet."
       operationId: ":CancelAssetRequest"
       parameters: [ { in: path, name: asset_request_id, required: true, schema: { type: string } } ]
       responses:
@@ -13097,6 +13112,7 @@ paths:
       description: "Custom method reject for leave-request."
       operationId: ":RejectLeaveRequest"
       parameters: [ { in: path, name: leave_request_id, required: true, schema: { type: string } } ]
+      requestBody: { $ref: '#/components/requestBodies/RejectBody' }
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/PermissionDenied' }
@@ -13661,6 +13677,7 @@ paths:
       description: "Custom method reject for reimbursement."
       operationId: ":RejectReimbursement"
       parameters: [ { in: path, name: reimbursement_id, required: true, schema: { type: string } } ]
+      requestBody: { $ref: '#/components/requestBodies/RejectBody' }
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/PermissionDenied' }
@@ -13672,7 +13689,7 @@ paths:
         '500': { $ref: '#/components/responses/Problem' }
   /v1/reimbursements/{reimbursement_id}:cancel:
     post:
-      description: "Custom method cancel for reimbursement."
+      description: "Custom method cancel for reimbursement: withdraws a pending claim, or an approved one not yet paid. A claim settled against an advance cannot be withdrawn once approved; a claim an approved company expense created is withdrawn together with that expense."
       operationId: ":CancelReimbursement"
       parameters: [ { in: path, name: reimbursement_id, required: true, schema: { type: string } } ]
       responses:
@@ -14291,14 +14308,7 @@ paths:
       description: "Custom method reject for expense (SUBMITTED -> REJECTED; records the reviewer's reason)."
       operationId: ":RejectExpense"
       parameters: [ { in: path, name: expense_id, required: true, schema: { type: string } } ]
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                note: { type: string, description: "Why it was rejected; sent to the submitter and kept on the record." }
+      requestBody: { $ref: '#/components/requestBodies/RejectBody' }
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/PermissionDenied' }
@@ -14341,7 +14351,7 @@ paths:
         '500': { $ref: '#/components/responses/Problem' }
   /v1/expenses/{expense_id}:cancel:
     post:
-      description: "Custom method cancel for expense."
+      description: "Custom method cancel for expense: withdraws a draft, a submitted expense, or an approved one not yet paid (an employee-fronted one together with its unpaid payroll claim). Refused when a company card charge is matched to it. On a recurring template it stops the schedule."
       operationId: ":CancelExpense"
       parameters: [ { in: path, name: expense_id, required: true, schema: { type: string } } ]
       responses:

@@ -31,9 +31,9 @@ import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Sheet, SheetBody, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { useToast } from "@/components/ui/use-toast";
-import { useConfirm } from "@/components/common/confirm";
+import { useAskReason, useConfirm } from "@/components/common/confirm";
 import { PunchFixDialog } from "@/components/common/PunchFixDialog";
-import { confirmDecision } from "@/lib/confirmDecision";
+import { askDecision, confirmDecision } from "@/lib/confirmDecision";
 
 const DAY_MS = 86400000;
 const upper = (s?: string) => (s ?? "").toUpperCase();
@@ -596,6 +596,7 @@ export default function Attendance({ me }: { me: Me }) {
                     <div className="min-w-0 flex-1">
                       <p className="text-sm font-medium">{formatDate(r.date)}</p>
                       <p className="truncate text-xs text-muted-foreground">{times}{r.reason ? ` · ${r.reason}` : ""}</p>
+                      {upper(r.state) === "REJECTED" && r.decision_note && <p className="text-xs text-destructive">Rejected: {r.decision_note}</p>}
                     </div>
                     <RegStatePill state={r.state} />
                     {upper(r.state) === "PENDING" && (r.access?.can ?? []).includes("cancel") && (
@@ -699,6 +700,7 @@ function PendingCorrections({ tz, employees, onDecided }: { tz: string; employee
   const { regularizations, reload } = useApprovals();
   const { toast } = useToast();
   const confirm = useConfirm();
+  const askReason = useAskReason();
   const [busy, setBusy] = useState<string | null>(null);
   const nameOf = useMemo(() => {
     const m = new Map(employees.map((e) => [idOf(e.path), `${e.first_name} ${e.last_name}`] as const));
@@ -709,10 +711,11 @@ function PendingCorrections({ tz, employees, onDecided }: { tz: string; employee
   async function decide(r: AttendanceRegularization, verb: "approve" | "reject") {
     // Approving rewrites that day's punches with the requested ones - a correction to the attendance record,
     // which payroll reads. Worth naming whose day is about to change.
-    if (!(await confirmDecision(confirm, verb, `${nameOf(r.employee)}'s correction for ${formatDate(r.date ?? "")}`))) return;
+    const body = await askDecision({ confirm, askReason }, verb, `${nameOf(r.employee)}'s correction for ${formatDate(r.date ?? "")}`);
+    if (body === null) return;
     setBusy(r.path);
     try {
-      await invoke(`attendance-regularizations/${idOf(r.path)}`, verb, r.etag);
+      await invoke(`attendance-regularizations/${idOf(r.path)}`, verb, r.etag, body);
       toast({ title: verb === "approve" ? "Correction approved" : "Correction rejected", variant: "success" });
       reload();
       onDecided();

@@ -829,7 +829,7 @@ describe("leave encashment: approve debits the balance (atomic guarded decrement
     const enc = await computeAndStoreEncashment(deps, actor, { employee: `employees/${emp}`, leave_type: `leave-types/${lt}`, days: 4 });
     await approveEncashment(deps, actor, enc.uuid); // wins: APPROVED, balance 10 -> 6
     // The reject arrives holding the PENDING it read a moment ago. It must lose on the guard, not overwrite.
-    await expect(rejectEncashment(deps, actor, enc.uuid)).rejects.toThrow(/no longer pending|not pending/);
+    await expect(rejectEncashment(deps, actor, enc.uuid, "Balance is needed for year-end")).rejects.toThrow(/no longer pending|not pending/);
 
     const row = (await deps.db.select().from(schema.leaveEncashments).where(eq(schema.leaveEncashments.uuid, enc.uuid)))[0]!;
     expect(row.state).toBe("APPROVED"); // not stamped over

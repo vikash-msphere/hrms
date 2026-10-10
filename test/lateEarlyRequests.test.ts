@@ -193,13 +193,23 @@ describe("deciding", () => {
     expect(approvals.length).toBe(1);
   });
 
-  it("lets the owner cancel only while it is pending", async () => {
+  it("lets the owner cancel while pending, and once approved until the day is over", async () => {
     await seed();
     const pending = await file();
     expect(await cancelLateEarlyRequest(deps, aya, pending.uuid)).toMatchObject({ state: "CANCELLED", decidedBy: null });
+    // Approved for today: they turned up on time after all, so the excusal goes back.
+    const today = await file({ at: "10:00" });
+    await approveLateEarlyRequest(deps, mgr, today.uuid);
+    expect(await cancelLateEarlyRequest(deps, aya, today.uuid)).toMatchObject({ state: "CANCELLED" });
+    expect((await approvedExcusals(deps, Date.parse(`${MON}T00:00:00Z`), Date.parse(`${MON}T00:00:00Z`))).size).toBe(0);
+    // Approved for tomorrow, read the day after it: that day is over and stays as judged.
     const other = await file({ date: "2026-03-03" });
     await approveLateEarlyRequest(deps, mgr, other.uuid);
-    await expect(cancelLateEarlyRequest(deps, aya, other.uuid)).rejects.toThrow(/only pending requests can be cancelled/);
+    await expect(cancelLateEarlyRequest(at("2026-03-04T04:00:00.000Z"), aya, other.uuid)).rejects.toThrow(/day that is over/);
+    // A rejected one is not the owner's to cancel at all.
+    const rejected = await file({ date: "2026-03-04" });
+    await rejectLateEarlyRequest(deps, mgr, rejected.uuid, "No cover that day");
+    await expect(cancelLateEarlyRequest(deps, aya, rejected.uuid)).rejects.toThrow(/only pending requests, or approved ones/);
   });
 
   it("tells the requester, under a category an org can switch off", async () => {

@@ -16,8 +16,8 @@ import { AccessScope } from "@/components/access/AccessScope";
 import { AccessAction } from "@/components/access/AccessAction";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
-import { useConfirm } from "@/components/common/confirm";
-import { confirmDecision } from "@/lib/confirmDecision";
+import { useAskReason } from "@/components/common/confirm";
+import { askRejectReason } from "@/lib/confirmDecision";
 import { useOrg, useMoney } from "@/lib/org";
 
 /** Per-employee India income-tax (TDS) projection for the financial year. Tax is computed server-side from
@@ -25,7 +25,7 @@ import { useOrg, useMoney } from "@/lib/org";
  *  Access: owner, HR, payroll, super_admin. */
 export function EmployeeTaxDetails({ employeeId, canEdit, canVerify = false }: { employeeId: string; canEdit: boolean; canVerify?: boolean }) {
   const { toast } = useToast();
-  const confirm = useConfirm();
+  const askReason = useAskReason();
   const { org } = useOrg();
   // Every figure on this panel goes through the ORG's formatter. It used to be a local
   // `₹${Math.round(n).toLocaleString("en-IN")}` at fifteen call sites - monthly TDS, prior-employer income,
@@ -95,9 +95,13 @@ export function EmployeeTaxDetails({ employeeId, canEdit, canVerify = false }: {
   // HR/payroll verify or reject the declared figures (maker-checker: the server rejects verifying your own).
   async function decide(action: "verify" | "reject") {
     // Rejecting un-applies the declared prior-employer income and TDS from this person's projection, which
-    // changes their withholding on the next run, and notifies them. Same weight as the reimbursement reject
-    // two files over, so it asks the same way (lib/confirmDecision.ts).
-    if (action === "reject" && !(await confirmDecision(confirm, "reject", "this prior-employer tax declaration"))) return;
+    // changes their withholding on the next run, and notifies them with the reason. Same weight as the
+    // reimbursement reject two files over, so it asks the same way (lib/confirmDecision.ts).
+    let reason: string | null = null;
+    if (action === "reject") {
+      reason = await askRejectReason(askReason, "This prior-employer tax declaration");
+      if (reason === null) return;
+    }
     setDeciding(true);
     try {
       // Version AND figures: verify re-reads the blob and stamps whatever it now says, so a re-declaration
@@ -105,7 +109,7 @@ export function EmployeeTaxDetails({ employeeId, canEdit, canVerify = false }: {
       const values =
         action === "verify"
           ? { action, verified_income: data?.prior_employer_income ?? 0, verified_tds: data?.prior_employer_tds ?? 0 }
-          : { action };
+          : { action, reason };
       setData(await patch<TaxDetails>(`employees/${employeeId}/tax`, { values }, data?.etag));
       toast({ title: action === "verify" ? "Previous employer details verified" : "Declaration rejected", variant: "success" });
     } catch (e) {
@@ -295,6 +299,9 @@ export function EmployeeTaxDetails({ employeeId, canEdit, canVerify = false }: {
                         </Button>
                       )}
                     </div>
+                  )}
+                  {status === "REJECTED" && d.rejection_reason && (
+                    <p className="w-full text-muted-foreground" data-sentry-mask>Rejected: {d.rejection_reason}</p>
                   )}
                 </div>
               )}

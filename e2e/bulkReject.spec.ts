@@ -3,10 +3,9 @@ import { allowConsoleErrors, fileLeave, gotoRoute, test, expect } from "./fixtur
 // Clearing a queue several at a time, the other way.
 //
 // `bulkApproval.spec.ts` proves the bulk bar's Approve path. Reject is not the same button with a different
-// label: `runBulkDecision` takes a different confirm copy (destructive, and it says up front that a bulk
-// reject carries no note - reject individually for that), a different verb per collection, and its own
-// merged summary. None of that was ever pressed.
-test("several requests can be rejected together, once confirmed, and with no note", async ({ as }) => {
+// label: `runBulkDecision` asks for ONE required reason that every requester in the batch is sent, a
+// different verb per collection, and its own merged summary.
+test("several requests can be rejected together, with one reason sent to each requester", async ({ as }) => {
   const page = await as("super");
   // Two browsers deciding from one shared inbox can collide; the server says 409 and the batch is pressed
   // again below, so the console line that comes with it is expected rather than a failure.
@@ -49,15 +48,24 @@ test("several requests can be rejected together, once confirmed, and with no not
     }
     await expect(page.getByText(`${pending.length} selected`)).toBeVisible({ timeout: 10_000 });
 
-    // Reject selected: a destructive confirmation that says up front there is no note in a bulk reject,
-    // unlike the per-row dialog `rejection.spec.ts` covers.
+    // Reject selected: a destructive prompt that will not go until it has a reason, the same reason for all.
     await page.getByRole("button", { name: "Reject selected" }).click();
     const confirm = page.getByRole("dialog");
     await expect(confirm.getByText(new RegExp(`Reject ${pending.length} request`))).toBeVisible({ timeout: 10_000 });
-    await expect(confirm.getByText(/carries no note/)).toBeVisible();
-    await confirm.getByRole("button", { name: "Reject all" }).click();
+    const submit = confirm.getByRole("button", { name: `Reject ${pending.length}`, exact: true });
+    await expect(submit).toBeDisabled();
+    await confirm.getByRole("textbox", { name: "Reason", exact: true }).fill(REASON);
+    await submit.click();
     await expect(page.getByText(`${pending.length} selected`)).toHaveCount(0, { timeout: 10_000 });
 
     for (const path of pending) expect(await state(path), `${path} after the bulk reject`).toBe("REJECTED");
   }).toPass({ timeout: 60_000 });
+
+  // Each request carries the one reason, for its requester to read.
+  for (const path of mine) {
+    const res = await employee.request.get(`/v1/${path}`);
+    expect(((await res.json()) as { decision_note?: string }).decision_note).toBe(REASON);
+  }
 });
+
+const REASON = "Team is at minimum cover that week";

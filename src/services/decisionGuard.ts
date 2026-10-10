@@ -14,7 +14,7 @@
 // org can lift the rule (`settings/approvals.allow_self_approval`). Off by default.
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { failedPrecondition } from "../lib/errors";
+import { failedPrecondition, invalidArgument } from "../lib/errors";
 import { getSettingValue } from "./settings";
 import { checkEtag, type VersionedRow } from "./versionGuard";
 
@@ -37,6 +37,19 @@ export async function assertNotSubject(deps: Deps, actor: Pick<AppUser, "employe
   if (await isBlockedSelfDecision(deps, actor, subjectEmployeeId)) {
     throw failedPrecondition(`you cannot ${action} your own ${noun}; somebody else has to decide it`);
   }
+}
+
+/**
+ * The reason half of a rejection: every request reject must say why, so the requester knows what to change
+ * before they file again. Returns the reason trimmed; refuses a blank one. The verb's body schema
+ * (http/rejectBody.ts) asks first, with a field-level message for the form; this is the same rule for every
+ * caller of a reject service, whichever way it arrived.
+ */
+export function requireRejectReason(reason: string | null | undefined): string {
+  const why = (reason ?? "").trim();
+  if (!why) throw invalidArgument("say why the request is rejected");
+  if (why.length > 1000) throw invalidArgument("the reason must be 1000 characters or fewer");
+  return why;
 }
 
 /**

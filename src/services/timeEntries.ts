@@ -13,7 +13,7 @@ import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/e
 import { keysetPage } from "./keysetPage";
 import { etagOf } from "../http/serialize";
 import { checkEtag, updateAtVersion } from "./versionGuard";
-import { assertNotSubject, assertReviewedVersion } from "./decisionGuard";
+import { assertNotSubject, assertReviewedVersion, requireRejectReason } from "./decisionGuard";
 
 type Status = typeof schema.timeEntries.$inferSelect.status;
 export type TimeEntryInput = {
@@ -116,7 +116,7 @@ export async function updateTimeEntry(deps: Deps, actor: AppUser, id: string, pa
 }
 
 // Workflow transitions. submit (DRAFT/REJECTED -> SUBMITTED), approve / reject (SUBMITTED -> APPROVED/REJECTED).
-async function transition(deps: Deps, actor: AppUser, id: string, allowedFrom: Status[], to: Status, decided: boolean, ifMatch?: string) {
+async function transition(deps: Deps, actor: AppUser, id: string, allowedFrom: Status[], to: Status, decided: boolean, ifMatch?: string, reason?: string) {
   const row = (await deps.db.select().from(schema.timeEntries).where(eq(schema.timeEntries.uuid, id)).limit(1))[0];
   if (!row || row.deleteTime) throw notFound("time entry not found");
   if (!allowedFrom.includes(row.status)) throw failedPrecondition(`a ${row.status.toLowerCase()} entry can't move to ${to.toLowerCase()}`);
@@ -124,11 +124,13 @@ async function transition(deps: Deps, actor: AppUser, id: string, allowedFrom: S
   // Approved hours are billable time on the record, so nobody signs off their own.
   if (to === "APPROVED") await assertNotSubject(deps, actor, row.employeeId, "approve", "time entry");
   // Guard the flip on the read status so the transition is EXACTLY-ONCE (0 rows = a concurrent call moved it).
-  const updated = (await deps.db.update(schema.timeEntries).set({ status: to, ...(decided ? { decidedBy: actor.uuid } : {}), updatedAt: new Date() }).where(and(eq(schema.timeEntries.uuid, id), eq(schema.timeEntries.status, row.status))).returning())[0];
+  // A rejected entry is resubmitted and decided again, so every decision writes the note afresh: an approval
+  // must not keep the reason from the rejection before it.
+  const updated = (await deps.db.update(schema.timeEntries).set({ status: to, ...(decided ? { decidedBy: actor.uuid, decisionNote: reason ?? null } : {}), updatedAt: new Date() }).where(and(eq(schema.timeEntries.uuid, id), eq(schema.timeEntries.status, row.status))).returning())[0];
   if (!updated) throw failedPrecondition(`a ${row.status.toLowerCase()} entry can't move to ${to.toLowerCase()}`);
-  await audit(deps, actor, `time-entry.${to.toLowerCase()}`, "time-entries", id, stateMeta(row.status, to, { employee: `employees/${row.employeeId}` }), updated);
+  await audit(deps, actor, `time-entry.${to.toLowerCase()}`, "time-entries", id, stateMeta(row.status, to, { employee: `employees/${row.employeeId}`, ...(reason ? { reason } : {}) }), updated);
   if (to === "APPROVED" || to === "REJECTED") {
-    await notify(deps, { recipient: row.employeeId, type: `timesheet.${to.toLowerCase()}`, title: `Timesheet ${to.toLowerCase()}`, body: `Your time entry was ${to.toLowerCase()}.`, link: "timesheets", actorId: actor.employeeId });
+    await notify(deps, { recipient: row.employeeId, type: `timesheet.${to.toLowerCase()}`, title: `Timesheet ${to.toLowerCase()}`, body: reason ? `Your time entry was rejected: ${reason}` : `Your time entry was ${to.toLowerCase()}.`, link: "timesheets", actorId: actor.employeeId });
   } else if (to === "SUBMITTED") {
     // A submitted timesheet needs the manager's review.
     await notifyManager(deps, row.employeeId, { type: "timesheet.requested", noun: "timesheet" });
@@ -137,5 +139,5 @@ async function transition(deps: Deps, actor: AppUser, id: string, allowedFrom: S
 }
 export const submitTimeEntry = (deps: Deps, actor: AppUser, id: string) => transition(deps, actor, id, ["DRAFT", "REJECTED"], "SUBMITTED", false);
 export const approveTimeEntry = (deps: Deps, actor: AppUser, id: string, ifMatch?: string) => transition(deps, actor, id, ["SUBMITTED"], "APPROVED", true, ifMatch);
-export const rejectTimeEntry = (deps: Deps, actor: AppUser, id: string, ifMatch?: string) => transition(deps, actor, id, ["SUBMITTED"], "REJECTED", true, ifMatch);
+export const rejectTimeEntry = async (deps: Deps, actor: AppUser, id: string, reason: string, ifMatch?: string) => transition(deps, actor, id, ["SUBMITTED"], "REJECTED", true, ifMatch, requireRejectReason(reason));
 

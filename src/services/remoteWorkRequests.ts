@@ -12,12 +12,13 @@ import { notify, notifyManager } from "./notifications";
 import { emitEvent } from "./eventBus";
 import { invalidArgument, notFound, failedPrecondition } from "../lib/errors";
 import { keysetPage } from "./keysetPage";
-import { assertNotSubject, assertReviewedVersion } from "./decisionGuard";
+import { orgToday, dayStartMs } from "./orgDay";
+import { assertNotSubject, assertReviewedVersion, requireRejectReason } from "./decisionGuard";
 
 // Work-from-home / remote-day requests: an employee asks to work remotely over a date range; a manager (own
-// dept) or HR approves/rejects, the owner cancels while pending. Mirrors the overtime/regularization pattern
-// (request -> decide, no side effect on approval). Who may decide is the verb's grant (middleware); the
-// service only guards state transitions.
+// dept) or HR approves/rejects, the owner cancels while pending or, once approved, until it starts. Mirrors the
+// overtime/regularization pattern (request -> decide, no side effect on approval). Who may decide is the verb's
+// grant (middleware); the service only guards state transitions.
 export type RemoteWorkInput = {
   employee?: string | null;
   start_date?: string; // YYYY-MM-DD
@@ -77,24 +78,33 @@ export async function createRemoteWorkRequest(deps: Deps, actor: AppUser, input:
 
 async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "REJECTED" | "CANCELLED", note?: string | null, ifMatch?: string) {
   const row = await getRemoteWorkRequest(deps, actor, id);
-  if (row.state !== "PENDING") throw failedPrecondition(to === "CANCELLED" ? "only pending requests can be cancelled" : "request is not pending");
+  const stuck = to === "CANCELLED" ? "only pending or upcoming approved requests can be cancelled" : "request is not pending";
+  // Cancel also takes back an APPROVED request the person no longer needs, up to the day it starts - the same
+  // line leave draws. Once a remote day has begun it is a record of where somebody worked, not a plan.
+  if (to === "CANCELLED" && row.state === "APPROVED") {
+    if (+new Date(row.startDate) <= dayStartMs(await orgToday(deps))) throw failedPrecondition("approved remote work that has already started cannot be cancelled");
+  } else if (row.state !== "PENDING") {
+    throw failedPrecondition(stuck);
+  }
   assertReviewedVersion(row, ifMatch);
   if (to === "APPROVED") await assertNotSubject(deps, actor, row.employeeId, "approve", "remote work request");
-  // Guard the flip on PENDING so the decision is EXACTLY-ONCE (0 rows = already decided by a concurrent call).
+  // Guard the flip on the state just validated so the decision is EXACTLY-ONCE (0 rows = already decided by a
+  // concurrent call).
+  const from = row.state;
   const [updated] = await deps.db
     .update(schema.remoteWorkRequests)
     .set({ state: to, decidedBy: actor.uuid, decisionNote: note ?? null, updatedAt: new Date() })
-    .where(and(eq(schema.remoteWorkRequests.uuid, id), eq(schema.remoteWorkRequests.state, "PENDING")))
+    .where(and(eq(schema.remoteWorkRequests.uuid, id), eq(schema.remoteWorkRequests.state, from)))
     .returning();
-  if (!updated) throw failedPrecondition(to === "CANCELLED" ? "only pending requests can be cancelled" : "request is not pending");
-  await audit(deps, actor, `remote_work_request.${to.toLowerCase()}`, "remote-work-requests", id, stateMeta(row.state, to, { employee: `employees/${row.employeeId}`, ...(note ? { reason: note } : {}) }), updated);
+  if (!updated) throw failedPrecondition(stuck);
+  await audit(deps, actor, `remote_work_request.${to.toLowerCase()}`, "remote-work-requests", id, stateMeta(from, to, { employee: `employees/${row.employeeId}`, ...(note ? { reason: note } : {}) }), updated);
   if (to === "APPROVED" || to === "REJECTED") {
-    await notify(deps, { recipient: row.employeeId, type: `remote.${to.toLowerCase()}`, title: `Remote work ${to.toLowerCase()}`, body: `Your remote work request was ${to.toLowerCase()}.`, link: "remote-work/history", subject: `remote-work-requests/${id}`, actorId: actor.employeeId });
+    await notify(deps, { recipient: row.employeeId, type: `remote.${to.toLowerCase()}`, title: `Remote work ${to.toLowerCase()}`, body: to === "REJECTED" ? `Your remote work request was rejected: ${note}` : `Your remote work request was ${to.toLowerCase()}.`, link: "remote-work/history", subject: `remote-work-requests/${id}`, actorId: actor.employeeId });
   }
   if (to === "APPROVED") await emitEvent(deps, actor, "remoteWork.approved", { subject: `remote-work-requests/${id}`, employeeId: row.employeeId, payload: { from: new Date(row.startDate).toISOString(), to: new Date(row.endDate).toISOString() } });
   return updated;
 }
 
 export const approveRemoteWorkRequest = (deps: Deps, actor: AppUser, id: string, note?: string | null, ifMatch?: string) => decide(deps, actor, id, "APPROVED", note, ifMatch);
-export const rejectRemoteWorkRequest = (deps: Deps, actor: AppUser, id: string, note?: string | null, ifMatch?: string) => decide(deps, actor, id, "REJECTED", note, ifMatch);
+export const rejectRemoteWorkRequest = async (deps: Deps, actor: AppUser, id: string, reason: string, ifMatch?: string) => decide(deps, actor, id, "REJECTED", requireRejectReason(reason), ifMatch);
 export const cancelRemoteWorkRequest = (deps: Deps, actor: AppUser, id: string) => decide(deps, actor, id, "CANCELLED");

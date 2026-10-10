@@ -12,7 +12,7 @@ import { emitEvent } from "./eventBus";
 import { invalidArgument, notFound, failedPrecondition } from "../lib/errors";
 import { keysetPage } from "./keysetPage";
 import { updateAsset } from "./assets";
-import { assertNotSubject, assertReviewedVersion } from "./decisionGuard";
+import { assertNotSubject, assertReviewedVersion, requireRejectReason } from "./decisionGuard";
 
 // Asset requests: an employee asks for kit ("I need a laptop"), naming a CATEGORY rather than a specific
 // machine - which one they get is inventory's call. A manager (own dept) or HR approves/rejects, the owner
@@ -82,24 +82,29 @@ export async function createAssetRequest(deps: Deps, actor: AppUser, input: Asse
 
 async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "REJECTED" | "CANCELLED", note?: string | null, ifMatch?: string) {
   const row = await getAssetRequest(deps, id);
-  const stuck = to === "CANCELLED" ? "only pending requests can be cancelled" : "request is not pending";
-  if (row.state !== "PENDING") throw failedPrecondition(stuck);
+  // Cancel also withdraws an APPROVED request nobody has handed anything over for yet - the requester no longer
+  // needs the kit. Once ISSUED the asset is theirs to return, which is the custody path, not this one.
+  const decidable = row.state === "PENDING" || (to === "CANCELLED" && row.state === "APPROVED");
+  const stuck = to === "CANCELLED" ? "only pending or approved requests that have not been handed over can be cancelled" : "request is not pending";
+  if (!decidable) throw failedPrecondition(stuck);
   assertReviewedVersion(row, ifMatch);
   if (to === "APPROVED") await assertNotSubject(deps, actor, row.employeeId, "approve", "asset request");
-  // Guard the flip on PENDING so the decision is EXACTLY-ONCE (0 rows = already decided by a concurrent call).
+  // Guard the flip on the state just validated so the decision is EXACTLY-ONCE (0 rows = already decided, or
+  // issued, by a concurrent call).
+  const from = row.state;
   const [updated] = await deps.db
     .update(schema.assetRequests)
     .set({ state: to, decidedBy: actor.uuid, decisionNote: note ?? null, updatedAt: new Date() })
-    .where(and(eq(schema.assetRequests.uuid, id), eq(schema.assetRequests.state, "PENDING")))
+    .where(and(eq(schema.assetRequests.uuid, id), eq(schema.assetRequests.state, from)))
     .returning();
   if (!updated) throw failedPrecondition(stuck);
-  await audit(deps, actor, `asset_request.${to.toLowerCase()}`, "asset-requests", id, stateMeta(row.state, to, { employee: `employees/${row.employeeId}`, ...(note ? { reason: note } : {}) }), updated);
+  await audit(deps, actor, `asset_request.${to.toLowerCase()}`, "asset-requests", id, stateMeta(from, to, { employee: `employees/${row.employeeId}`, ...(note ? { reason: note } : {}) }), updated);
   if (to === "APPROVED" || to === "REJECTED") {
     await notify(deps, {
       recipient: row.employeeId,
       type: to === "APPROVED" ? "asset.requestApproved" : "asset.requestRejected",
       title: `Asset request ${to.toLowerCase()}`,
-      body: to === "APPROVED" ? "Your asset request was approved - it will be handed over once something is free." : "Your asset request was rejected.",
+      body: to === "APPROVED" ? "Your asset request was approved - it will be handed over once something is free." : `Your asset request was rejected: ${note}`,
       link: "profile",
       subject: `asset-requests/${id}`,
       actorId: actor.employeeId,
@@ -110,7 +115,7 @@ async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "
 }
 
 export const approveAssetRequest = (deps: Deps, actor: AppUser, id: string, note?: string | null, ifMatch?: string) => decide(deps, actor, id, "APPROVED", note, ifMatch);
-export const rejectAssetRequest = (deps: Deps, actor: AppUser, id: string, note?: string | null, ifMatch?: string) => decide(deps, actor, id, "REJECTED", note, ifMatch);
+export const rejectAssetRequest = async (deps: Deps, actor: AppUser, id: string, reason: string, ifMatch?: string) => decide(deps, actor, id, "REJECTED", requireRejectReason(reason), ifMatch);
 export const cancelAssetRequest = (deps: Deps, actor: AppUser, id: string) => decide(deps, actor, id, "CANCELLED");
 
 /**

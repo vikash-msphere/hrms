@@ -13,6 +13,7 @@ import { keysetPage } from "./keysetPage";
 import { etagOf } from "../http/serialize";
 import { notify } from "./notifications";
 import { checkEtag, updateAtVersion } from "./versionGuard";
+import { requireRejectReason } from "./decisionGuard";
 
 type Status = typeof schema.taxDeclarations.$inferSelect.status;
 export type TaxDeclarationInput = {
@@ -115,6 +116,7 @@ export async function verifyTaxDeclaration(deps: Deps, actor: AppUser, id: strin
     status: "VERIFIED",
     verifiedAmount: verifiedAmount ?? row.declaredAmount,
     decidedBy: actor.uuid,
+    decisionNote: null, // a verify after a rejection retires the rejection's reason
     updatedAt: new Date(),
   });
   await audit(deps, actor, "tax-declaration.verify", "tax-declarations", id, stateMeta(row.status, "VERIFIED", { employee: `employees/${row.employeeId}`, diff: { status: { from: row.status, to: "VERIFIED" }, verifiedAmount: { from: row.verifiedAmount, to: updated.verifiedAmount } } }), updated);
@@ -125,14 +127,15 @@ export async function verifyTaxDeclaration(deps: Deps, actor: AppUser, id: strin
 }
 // Rejection is guarded the same way, for the converse reason: rejecting the declaration somebody has just
 // corrected sends them a "please review and resubmit" about a row they already fixed.
-export async function rejectTaxDeclaration(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
+export async function rejectTaxDeclaration(deps: Deps, actor: AppUser, id: string, rawReason: string, ifMatch?: string) {
+  const reason = requireRejectReason(rawReason);
   const row = (await deps.db.select().from(schema.taxDeclarations).where(eq(schema.taxDeclarations.uuid, id)).limit(1))[0];
   if (!row || row.deleteTime) throw notFound("declaration not found");
   checkEtag(row, ifMatch);
-  const updated = await updateAtVersion(deps, schema.taxDeclarations, "declaration", row, { status: "REJECTED", verifiedAmount: null, decidedBy: actor.uuid, updatedAt: new Date() });
-  await audit(deps, actor, "tax-declaration.reject", "tax-declarations", id, stateMeta(row.status, "REJECTED", { employee: `employees/${row.employeeId}` }), updated);
+  const updated = await updateAtVersion(deps, schema.taxDeclarations, "declaration", row, { status: "REJECTED", verifiedAmount: null, decidedBy: actor.uuid, decisionNote: reason, updatedAt: new Date() });
+  await audit(deps, actor, "tax-declaration.reject", "tax-declarations", id, stateMeta(row.status, "REJECTED", { employee: `employees/${row.employeeId}`, reason }), updated);
   if (row.status !== "REJECTED")
-    await notify(deps, { recipient: row.employeeId, type: "tax.rejected", title: "Tax declaration rejected", body: "Your investment/tax declaration was rejected - please review and resubmit.", link: "tax-declarations", subject: `tax-declarations/${id}`, actorId: actor.employeeId });
+    await notify(deps, { recipient: row.employeeId, type: "tax.rejected", title: "Tax declaration rejected", body: `Your investment/tax declaration was rejected: ${reason}. Please review and resubmit.`, link: "tax-declarations", subject: `tax-declarations/${id}`, actorId: actor.employeeId });
   return updated;
 }
 

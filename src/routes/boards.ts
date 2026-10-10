@@ -8,9 +8,11 @@ import { narrateBoard } from "../services/boardNarrate";
 import { toBoardResource } from "../http/serialize";
 import type { AppUser } from "../env";
 import { boardAccessLevel } from "../lib/objectAccess";
+import { TASK_TYPE_DISPLAYS } from "../domain/boards";
 
 const modeEnum = z.enum(["kanban", "scrum"]);
 const visibilityEnum = z.enum(["edit", "view", "private"]);
+const typeDisplayEnum = z.enum(TASK_TYPE_DISPLAYS);
 const memberSchema = z.object({ kind: z.enum(["user", "role"]), subject: z.string().min(1), level: z.enum(["view", "edit", "manage"]) }).passthrough();
 const createSchema = z.object({
   name: z.string().min(1),
@@ -24,6 +26,8 @@ const createSchema = z.object({
   swimlane_mode: z.string().optional(),
   swimlanes: z.array(z.any()).optional(),
   labels: z.array(z.any()).optional(),
+  task_types: z.array(z.any()).optional(),
+  task_type_display: typeDisplayEnum.optional(),
 }).strict();
 const shareSchema = z.object({ visibility: visibilityEnum.optional(), members: z.array(memberSchema).optional() }).strict();
 const updateSchema = z.object({
@@ -38,6 +42,8 @@ const configureSchema = z.object({
   swimlane_mode: z.string().optional(),
   swimlanes: z.array(z.any()).optional(),
   labels: z.array(z.any()).optional(),
+  task_types: z.array(z.any()).optional(),
+  task_type_display: typeDisplayEnum.optional(),
   hide_empty_lanes: z.boolean().optional(),
   reassign_lane_on_move: z.boolean().optional(),
   no_lane_label: z.string().nullable().optional(),

@@ -8,11 +8,13 @@ import { invalidArgument } from "../lib/errors";
 import {
   listExpenses, getExpense, createExpense, updateExpense,
   submitExpense, approveExpense, rejectExpense, cancelExpense, payExpense, seriesDriftFor, paymentDueFor, allocationsFor, expenseTriageFor,
+  settledExpenseIds,
   type ExpenseInput,
 } from "../services/expenses";
 import { putAttachment, downloadAttachment, attachedObjectIds, attachmentDisposition } from "../services/attachments";
 import { requireCappedBody } from "../services/documentsCommon";
 import { toExpenseResource } from "../http/serialize";
+import { rejectBody, type RejectBody } from "../http/rejectBody";
 
 const COL = "expenses";
 const INVOICE = "invoice"; // the attachment slot for an expense's invoice/receipt
@@ -74,7 +76,7 @@ export const expenses = collectionRoutes<ExpenseInput, typeof schema.expenses>({
   // costs is only useful where somebody is already looking at it, and deriving it per row would be a query an
   // expense. Both lookups are bounded to the page.
   decorate: async (deps, _actor, rows) => {
-    const [attached, drift, due, split, triage] = await Promise.all([
+    const [attached, drift, due, split, triage, settled] = await Promise.all([
       attachedObjectIds(deps, COL, INVOICE, rows.map((r) => r.uuid)),
       seriesDriftFor(deps, rows),
       paymentDueFor(deps, rows),
@@ -82,9 +84,12 @@ export const expenses = collectionRoutes<ExpenseInput, typeof schema.expenses>({
       // Only does any work when the page holds claims actually awaiting a decision; a ledger page of paid rows
       // returns an empty map without a read.
       expenseTriageFor(deps, rows),
+      // Whether an approved row's money has already moved, which is what refuses `:cancel` on it.
+      settledExpenseIds(deps, rows),
     ]);
     return rows.map((r) => ({
       ...r,
+      settled: settled.has(r.uuid),
       hasInvoice: attached.has(r.uuid),
       seriesDrift: drift.get(r.uuid) ?? null,
       dueOn: due.get(r.uuid) ?? null,
@@ -109,11 +114,7 @@ export const expenses = collectionRoutes<ExpenseInput, typeof schema.expenses>({
   verbs: {
     submit: { run: (deps, user, id) => submitExpense(deps, user, id) },
     approve: { run: (deps, user, id, _body, c) => approveExpense(deps, user, id, c.req.header("If-Match")) },
-    // A rejection may carry its reason, so the submitter learns why (the body is optional on the wire).
-    reject: {
-      schema: z.object({ note: z.string().max(1000).nullable().optional() }).strict(),
-      run: (deps, user, id, body: { note?: string | null }, c) => rejectExpense(deps, user, id, body?.note ?? null, c.req.header("If-Match")),
-    },
+    reject: { schema: rejectBody, run: (deps, user, id, body: RejectBody, c) => rejectExpense(deps, user, id, body.reason, c.req.header("If-Match")) },
     cancel: { run: (deps, user, id) => cancelExpense(deps, user, id) },
     // Fill a DRAFT claim's fields from its receipt. The TEXT is posted by the client because the Worker
     // cannot read a PDF - the SPA already runs pdfjs for the viewer - which also keeps a PDF parser out of

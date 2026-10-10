@@ -24,8 +24,8 @@ export type BoardColumn = {
   allowCreate: boolean;
 };
 
-export type SwimlaneMode = "none" | "assignee" | "goal" | "priority" | "department" | "custom";
-export const SWIMLANE_MODES: readonly SwimlaneMode[] = ["none", "assignee", "goal", "priority", "department", "custom"];
+export type SwimlaneMode = "none" | "assignee" | "goal" | "priority" | "task_type" | "department" | "custom";
+export const SWIMLANE_MODES: readonly SwimlaneMode[] = ["none", "assignee", "goal", "priority", "task_type", "department", "custom"];
 
 // A custom swimlane (used when swimlaneMode = "custom"); cards carry a `swimlaneKey` naming one.
 export type Swimlane = { key: string; label: string };
@@ -35,6 +35,23 @@ export type Label = { key: string; label: string; color?: string };
 
 export const CARD_PRIORITIES = ["low", "medium", "high", "urgent"] as const;
 export type CardPriority = (typeof CARD_PRIORITIES)[number];
+
+// A task type in the board's type catalog: what KIND of work a task is (bug, feature, chore), where priority
+// says how soon. A card carries at most one type, by `key`. `color` and `icon` are UI hints; `icon` names one
+// of the SPA's task-type glyphs and an unknown name draws a plain dot.
+export type TaskType = { key: string; label: string; color?: string; icon?: string };
+
+// How a task tile shows its type: the glyph alone, the type's name alone, or the glyph and the name.
+export const TASK_TYPE_DISPLAYS = ["icon", "label", "both"] as const;
+export type TaskTypeDisplay = (typeof TASK_TYPE_DISPLAYS)[number];
+
+// The starter catalog a new board gets when the caller sends none. Teams reshape it via the `configure` verb.
+export const DEFAULT_TASK_TYPES: TaskType[] = [
+  { key: "feature", label: "Feature", color: "#16a34a", icon: "feature" },
+  { key: "bug", label: "Bug", color: "#dc2626", icon: "bug" },
+  { key: "improvement", label: "Improvement", color: "#2563eb", icon: "improvement" },
+  { key: "chore", label: "Chore", color: "#64748b", icon: "chore" },
+];
 
 // Sensible starter board: an options backlog, a committed "Ready" column, work + review WIP-limited columns,
 // and a delivery "Done" column. New tasks are created in the backlog only. Teams reshape it via the `configure` verb.
@@ -114,6 +131,31 @@ export function normalizeLabels(input: unknown): Label[] {
     const color = s.color ? String(s.color) : undefined;
     return { key, label: String(s.label ?? "").trim() || key, ...(color ? { color } : {}) };
   });
+}
+
+// The board's task-type catalog. Same key rules as labels: a card's type is one of these keys.
+export function normalizeTaskTypes(input: unknown): TaskType[] {
+  if (!Array.isArray(input)) return [];
+  const seen = new Set<string>();
+  return input.map((raw) => {
+    const s = (raw ?? {}) as Record<string, unknown>;
+    const key = String(s.key ?? "").trim();
+    if (!KEY_RE.test(key)) throw new Error(`task type key "${key}" must be a lowercase slug`);
+    if (seen.has(key)) throw new Error(`duplicate task type key "${key}"`);
+    seen.add(key);
+    const color = s.color ? String(s.color) : undefined;
+    const icon = s.icon ? String(s.icon) : undefined;
+    return { key, label: String(s.label ?? "").trim() || key, ...(color ? { color } : {}), ...(icon ? { icon } : {}) };
+  });
+}
+
+export function parseTaskTypes(json: string | null | undefined): TaskType[] {
+  if (!json) return [];
+  try {
+    return normalizeTaskTypes(JSON.parse(json));
+  } catch {
+    return [];
+  }
 }
 
 // A card's label keys: a deduped array of slug strings (references into a board's label catalog).

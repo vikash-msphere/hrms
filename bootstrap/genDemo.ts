@@ -10,7 +10,7 @@
 //   Run:    node --import ./scripts/tsResolve.mjs bootstrap/genDemo.ts > bootstrap/demo.sql
 //   Apply:  scripts/start.sh --demo   (resets, bootstraps, then applies this)
 import { bytesToBase32 } from "../src/lib/idCodec";
-import { DEFAULT_BOARD_COLUMNS, DEFAULT_SCRUM_COLUMNS } from "../src/domain/boards";
+import { DEFAULT_BOARD_COLUMNS, DEFAULT_SCRUM_COLUMNS, DEFAULT_TASK_TYPES, type TaskType } from "../src/domain/boards";
 import { DEFAULT_KUDOS_CONFIG, pointsForLevel } from "../src/domain/kudos";
 import { KUDOS_CONFIG } from "./collections/kudos";
 
@@ -337,7 +337,7 @@ const goalWatcherRows = GOAL_WATCHERS.map(([goal, emp]) =>
 
 // --- Boards + tasks (/boards) ----------------------------------------------------------------------------------
 // Two boards, because the two modes read differently: a continuous-flow kanban board for engineering (WIP limits
-// on the working columns, work-type swimlanes) and a scrum board for product (sprints, swimlanes by assignee).
+// on the working columns, swimlanes by task type) and a scrum board for product (sprints, swimlanes by assignee).
 // bootstrap.sql seeds an empty "General" board so a fresh org has somewhere to drop work; these carry the cards,
 // so the board view, the WIP chips, the sprint burndown and the flow analytics all have something to draw.
 // Board codes start at ve-02: `ve-01` is the bootstrapped board, and `code` is UNIQUE. Both are in the
@@ -345,14 +345,20 @@ const goalWatcherRows = GOAL_WATCHERS.map(([goal, emp]) =>
 type BoardDef = {
   uuid: string; code: string; name: string; description: string; prefix: string;
   mode: "kanban" | "scrum"; columns: typeof DEFAULT_BOARD_COLUMNS;
-  swimlaneMode: "none" | "assignee" | "goal" | "priority" | "department" | "custom";
+  swimlaneMode: "none" | "assignee" | "goal" | "priority" | "task_type" | "department" | "custom";
   swimlanes: { key: string; label: string }[];
   labels: { key: string; label: string; color: string }[];
+  taskTypes: TaskType[];
 };
 const engBoard: BoardDef = {
   uuid: nid(), code: "ve-02", name: "Engineering delivery", description: "Platform work in flow. Swimlanes are the type of work; the WIP limits are the team's.",
-  prefix: "ENG", mode: "kanban", columns: DEFAULT_BOARD_COLUMNS, swimlaneMode: "custom",
-  swimlanes: [{ key: "feature", label: "Feature" }, { key: "bug", label: "Bug" }, { key: "chore", label: "Chore" }, { key: "tech_debt", label: "Tech debt" }],
+  prefix: "ENG", mode: "kanban", columns: DEFAULT_BOARD_COLUMNS, swimlaneMode: "task_type", swimlanes: [],
+  taskTypes: [
+    { key: "feature", label: "Feature", color: "#16a34a", icon: "feature" },
+    { key: "bug", label: "Bug", color: "#dc2626", icon: "bug" },
+    { key: "chore", label: "Chore", color: "#64748b", icon: "chore" },
+    { key: "tech_debt", label: "Tech debt", color: "#d97706", icon: "debt" },
+  ],
   labels: [
     { key: "api", label: "API", color: "#2563eb" },
     { key: "ui", label: "UI", color: "#7c3aed" },
@@ -365,7 +371,7 @@ const engBoard: BoardDef = {
 };
 const prdBoard: BoardDef = {
   uuid: nid(), code: "ve-03", name: "Product delivery", description: "Two-week sprints. The product backlog is everything not yet pulled into one.",
-  prefix: "PRD", mode: "scrum", columns: DEFAULT_SCRUM_COLUMNS, swimlaneMode: "assignee", swimlanes: [],
+  prefix: "PRD", mode: "scrum", columns: DEFAULT_SCRUM_COLUMNS, swimlaneMode: "assignee", swimlanes: [], taskTypes: DEFAULT_TASK_TYPES,
   labels: [
     { key: "research", label: "Research", color: "#0d9488" },
     { key: "design", label: "Design", color: "#7c3aed" },
@@ -375,7 +381,7 @@ const prdBoard: BoardDef = {
 };
 const BOARDS = [engBoard, prdBoard];
 const boardRows = BOARDS.map((b) =>
-  ` (${q(b.uuid)},${q(b.code)},${q(b.name)},${q(b.description)},${q(b.prefix)},${q(b.mode)},${q(JSON.stringify(b.columns))},${q(b.swimlaneMode)},${q(JSON.stringify(b.swimlanes))},NULL,${q(JSON.stringify(b.labels))},0,0,${T0},${T0})`,
+  ` (${q(b.uuid)},${q(b.code)},${q(b.name)},${q(b.description)},${q(b.prefix)},${q(b.mode)},${q(JSON.stringify(b.columns))},${q(b.swimlaneMode)},${q(JSON.stringify(b.swimlanes))},NULL,${q(JSON.stringify(b.labels))},${q(JSON.stringify(b.taskTypes))},0,0,${T0},${T0})`,
 );
 
 // Sprints on the scrum board: one finished (so velocity has a data point) and one running.
@@ -389,7 +395,7 @@ const sprintRows = SPRINTS.map((s) =>
 );
 
 type CardSpec = {
-  key: string; board: BoardDef; column: string; lane?: string;
+  key: string; board: BoardDef; column: string; type?: string; // a key in the board's task-type catalog
   title: string; description?: string;
   owner: number; assignee?: number; reporter?: number;
   priority: "low" | "medium" | "high" | "urgent";
@@ -405,20 +411,20 @@ type CardSpec = {
 // Engineering board. Ordered oldest-first so a card that blocks another is always inserted before it, and so
 // the per-board task keys (ENG-1, ENG-2...) run in the order the work was filed.
 const CARDS: CardSpec[] = [
-  { key: "e_importer", board: engBoard, column: "done", lane: "tech_debt", title: "Retire the legacy attendance importer", description: "Nothing has written to it since the shift roster landed.", owner: 1, assignee: 1, reporter: 2, priority: "medium", labels: ["infra"], size: 5, ageDays: 30, doneDaysAgo: 20 },
-  { key: "e_csv", board: engBoard, column: "done", lane: "feature", title: "Streaming CSV export for large reports", description: "Exports over 50k rows timed out; stream them instead of buffering.", owner: 1, assignee: 1, reporter: 4, priority: "high", labels: ["api", "perf"], size: 5, ageDays: 26, doneDaysAgo: 16 },
-  { key: "e_payslip", board: engBoard, column: "done", lane: "bug", title: "Duplicate payslip PDF on retry", description: "A retried run re-rendered the PDF and left two documents on the employee.", owner: 0, assignee: 0, reporter: 3, priority: "urgent", labels: ["api"], size: 3, ageDays: 21, doneDaysAgo: 12 },
-  { key: "e_cache", board: engBoard, column: "done", lane: "feature", title: "Cache resource manifests in the edge worker", description: "Manifest reads were the single biggest source of cold-start latency.", owner: 0, assignee: 0, reporter: 2, priority: "high", labels: ["perf", "infra"], size: 8, goal: "g_aarav_latency", ageDays: 18, doneDaysAgo: 6 },
-  { key: "e_rotate", board: engBoard, column: "review", lane: "chore", title: "Rotate the D1 credentials", description: "Quarterly rotation, with the runbook updated as part of it.", owner: 3, assignee: 3, reporter: 2, priority: "medium", labels: ["security"], size: 2, dueInDays: 12, cadence: "quarterly", ageDays: 9 },
-  { key: "e_warm", board: engBoard, column: "review", lane: "feature", title: "Warm the worker on deploy", description: "The last piece of the cold-start work: a post-deploy hook that takes the first hit.", owner: 0, assignee: 0, reporter: 2, priority: "high", labels: ["perf"], size: 3, goal: "g_aarav_latency", ageDays: 8 },
-  { key: "e_regression", board: engBoard, column: "in_progress", lane: "chore", title: "Regression pack for payroll runs", description: "Golden-file runs over the statutory deductions, wired into CI.", owner: 3, assignee: 3, reporter: 2, priority: "medium", labels: ["ci"], size: 8, goal: "g_priya_regression", blocked: true, blockReason: "Staging worker is tied up by the latency work.", blockedBy: "e_warm", dueInDays: 14, ageDays: 7 },
-  { key: "e_flaky", board: engBoard, column: "in_progress", lane: "bug", title: "Flaky clock-in e2e spec", description: "Fails about one run in six, always on the fence check.", owner: 1, assignee: 1, reporter: 3, priority: "high", labels: ["ci"], size: 3, goal: "g_diya_flaky", ageDays: 6 },
-  { key: "e_audit", board: engBoard, column: "ready", lane: "chore", title: "Audit log retention policy", description: "Decide the window, then enforce it in the nightly sweep.", owner: 3, reporter: 2, priority: "low", labels: ["security", "docs"], size: 2, ageDays: 5 },
-  { key: "e_tags", board: engBoard, column: "ready", lane: "feature", title: "Bulk import for asset tags", description: "Sales keep onboarding kit in batches of forty; one at a time does not scale.", owner: 0, reporter: 8, priority: "medium", labels: ["ui", "api"], size: 5, dueInDays: 18, ageDays: 4 },
-  { key: "e_search", board: engBoard, column: "ready", lane: "feature", title: "Search ranking for people results", description: "An exact name match should outrank a body-text hit.", owner: 1, reporter: 5, priority: "medium", labels: ["api"], size: 3, ageDays: 3 },
-  { key: "e_columns", board: engBoard, column: "backlog", lane: "tech_debt", title: "Drop the dead reimbursement columns", owner: 1, reporter: 2, priority: "low", labels: ["infra"], size: 2, ageDays: 2 },
-  { key: "e_factory", board: engBoard, column: "backlog", lane: "chore", title: "Document the collection factory", description: "The add-a-collection checklist exists; the why behind it does not.", owner: 0, reporter: 2, priority: "low", labels: ["docs"], size: 1, ageDays: 2 },
-  { key: "e_contrast", board: engBoard, column: "backlog", lane: "bug", title: "Dark-mode contrast on dense tables", owner: 3, reporter: 7, priority: "low", labels: ["ui"], size: 3, ageDays: 1 },
+  { key: "e_importer", board: engBoard, column: "done", type: "tech_debt", title: "Retire the legacy attendance importer", description: "Nothing has written to it since the shift roster landed.", owner: 1, assignee: 1, reporter: 2, priority: "medium", labels: ["infra"], size: 5, ageDays: 30, doneDaysAgo: 20 },
+  { key: "e_csv", board: engBoard, column: "done", type: "feature", title: "Streaming CSV export for large reports", description: "Exports over 50k rows timed out; stream them instead of buffering.", owner: 1, assignee: 1, reporter: 4, priority: "high", labels: ["api", "perf"], size: 5, ageDays: 26, doneDaysAgo: 16 },
+  { key: "e_payslip", board: engBoard, column: "done", type: "bug", title: "Duplicate payslip PDF on retry", description: "A retried run re-rendered the PDF and left two documents on the employee.", owner: 0, assignee: 0, reporter: 3, priority: "urgent", labels: ["api"], size: 3, ageDays: 21, doneDaysAgo: 12 },
+  { key: "e_cache", board: engBoard, column: "done", type: "feature", title: "Cache resource manifests in the edge worker", description: "Manifest reads were the single biggest source of cold-start latency.", owner: 0, assignee: 0, reporter: 2, priority: "high", labels: ["perf", "infra"], size: 8, goal: "g_aarav_latency", ageDays: 18, doneDaysAgo: 6 },
+  { key: "e_rotate", board: engBoard, column: "review", type: "chore", title: "Rotate the D1 credentials", description: "Quarterly rotation, with the runbook updated as part of it.", owner: 3, assignee: 3, reporter: 2, priority: "medium", labels: ["security"], size: 2, dueInDays: 12, cadence: "quarterly", ageDays: 9 },
+  { key: "e_warm", board: engBoard, column: "review", type: "feature", title: "Warm the worker on deploy", description: "The last piece of the cold-start work: a post-deploy hook that takes the first hit.", owner: 0, assignee: 0, reporter: 2, priority: "high", labels: ["perf"], size: 3, goal: "g_aarav_latency", ageDays: 8 },
+  { key: "e_regression", board: engBoard, column: "in_progress", type: "chore", title: "Regression pack for payroll runs", description: "Golden-file runs over the statutory deductions, wired into CI.", owner: 3, assignee: 3, reporter: 2, priority: "medium", labels: ["ci"], size: 8, goal: "g_priya_regression", blocked: true, blockReason: "Staging worker is tied up by the latency work.", blockedBy: "e_warm", dueInDays: 14, ageDays: 7 },
+  { key: "e_flaky", board: engBoard, column: "in_progress", type: "bug", title: "Flaky clock-in e2e spec", description: "Fails about one run in six, always on the fence check.", owner: 1, assignee: 1, reporter: 3, priority: "high", labels: ["ci"], size: 3, goal: "g_diya_flaky", ageDays: 6 },
+  { key: "e_audit", board: engBoard, column: "ready", type: "chore", title: "Audit log retention policy", description: "Decide the window, then enforce it in the nightly sweep.", owner: 3, reporter: 2, priority: "low", labels: ["security", "docs"], size: 2, ageDays: 5 },
+  { key: "e_tags", board: engBoard, column: "ready", type: "feature", title: "Bulk import for asset tags", description: "Sales keep onboarding kit in batches of forty; one at a time does not scale.", owner: 0, reporter: 8, priority: "medium", labels: ["ui", "api"], size: 5, dueInDays: 18, ageDays: 4 },
+  { key: "e_search", board: engBoard, column: "ready", type: "feature", title: "Search ranking for people results", description: "An exact name match should outrank a body-text hit.", owner: 1, reporter: 5, priority: "medium", labels: ["api"], size: 3, ageDays: 3 },
+  { key: "e_columns", board: engBoard, column: "backlog", type: "tech_debt", title: "Drop the dead reimbursement columns", owner: 1, reporter: 2, priority: "low", labels: ["infra"], size: 2, ageDays: 2 },
+  { key: "e_factory", board: engBoard, column: "backlog", type: "chore", title: "Document the collection factory", description: "The add-a-collection checklist exists; the why behind it does not.", owner: 0, reporter: 2, priority: "low", labels: ["docs"], size: 1, ageDays: 2 },
+  { key: "e_contrast", board: engBoard, column: "backlog", type: "bug", title: "Dark-mode contrast on dense tables", owner: 3, reporter: 7, priority: "low", labels: ["ui"], size: 3, ageDays: 1 },
 
   // Product board. The two oldest sat in the sprint that closed; the middle set is the running sprint; the last
   // two carry no sprint at all, which on a scrum board IS the product backlog.
@@ -470,7 +476,7 @@ for (const c of CARDS) {
   // Coded under the board (domain/boardAccess.ts), leaf = the per-board sequence behind the task key.
   const code = `${c.board.code}-${String(seq).padStart(3, "0")}`;
   cardRows.push(
-    ` (${q(cardIds.get(c.key))},${q(code)},${q(c.board.uuid)},${seq},${q(c.board.prefix)},${c.sprint ? q(sprintIds.get(c.sprint)) : "NULL"},${q(owner.uuid)},${q(owner.deptUuid)},${q(c.column)},${c.lane ? q(c.lane) : "NULL"},${rank},${q(c.title)},${q(c.description ?? null)},${c.assignee == null ? "NULL" : q(employees[c.assignee]!.uuid)},${c.reporter == null ? "NULL" : q(employees[c.reporter]!.uuid)},${q(c.priority)},${q(JSON.stringify(c.labels))},'[]',${num(c.size)},${c.dueInDays == null ? "NULL" : NOW + c.dueInDays * DAY},${c.blocked ? 1 : 0},${q(c.blockReason ?? null)},${c.blockedBy ? q(cardIds.get(c.blockedBy)) : "NULL"},${c.goal ? q(goalIds.get(c.goal)) : "NULL"},${q(c.cadence ?? null)},NULL,${num(committed)},${num(started)},${num(delivered)},${created},${T0})`,
+    ` (${q(cardIds.get(c.key))},${q(code)},${q(c.board.uuid)},${seq},${q(c.board.prefix)},${c.sprint ? q(sprintIds.get(c.sprint)) : "NULL"},${q(owner.uuid)},${q(owner.deptUuid)},${q(c.column)},NULL,${rank},${q(c.title)},${q(c.description ?? null)},${c.assignee == null ? "NULL" : q(employees[c.assignee]!.uuid)},${c.reporter == null ? "NULL" : q(employees[c.reporter]!.uuid)},${q(c.priority)},${q(c.type ?? null)},${q(JSON.stringify(c.labels))},'[]',${num(c.size)},${c.dueInDays == null ? "NULL" : NOW + c.dueInDays * DAY},${c.blocked ? 1 : 0},${q(c.blockReason ?? null)},${c.blockedBy ? q(cardIds.get(c.blockedBy)) : "NULL"},${c.goal ? q(goalIds.get(c.goal)) : "NULL"},${q(c.cadence ?? null)},NULL,${num(committed)},${num(started)},${num(delivered)},${created},${T0})`,
   );
   const actor = employees[c.assignee ?? c.owner]!;
   for (let k = 0; k <= idx; k++) {
@@ -541,11 +547,11 @@ const out: string[] = [
   goalContributorRows.join(",\n") + ";",
   "INSERT INTO goal_watchers (uuid,goal_id,employee_id,created_at) VALUES",
   goalWatcherRows.join(",\n") + ";",
-  "INSERT INTO boards (uuid,code,name,description,task_prefix,mode,columns_json,swimlane_mode,swimlanes_json,no_lane_label,labels_json,hide_empty_lanes,reassign_lane_on_move,created_at,updated_at) VALUES",
+  "INSERT INTO boards (uuid,code,name,description,task_prefix,mode,columns_json,swimlane_mode,swimlanes_json,no_lane_label,labels_json,task_types_json,hide_empty_lanes,reassign_lane_on_move,created_at,updated_at) VALUES",
   boardRows.join(",\n") + ";",
   "INSERT INTO sprints (uuid,code,board_id,name,goal,start_date,end_date,state,created_at,updated_at) VALUES",
   sprintRows.join(",\n") + ";",
-  "INSERT INTO cards (uuid,code,board_id,seq,key_prefix,sprint_id,employee_id,department_id,column_key,swimlane_key,rank,title,description,assignee_id,reporter_id,priority,labels_json,documents_json,size,due_date,blocked,block_reason,blocked_by_id,goal_id,cadence,cadence_anchor_day,committed_at,started_at,delivered_at,created_at,updated_at) VALUES",
+  "INSERT INTO cards (uuid,code,board_id,seq,key_prefix,sprint_id,employee_id,department_id,column_key,swimlane_key,rank,title,description,assignee_id,reporter_id,priority,task_type,labels_json,documents_json,size,due_date,blocked,block_reason,blocked_by_id,goal_id,cadence,cadence_anchor_day,committed_at,started_at,delivered_at,created_at,updated_at) VALUES",
   cardRows.join(",\n") + ";",
   "INSERT INTO card_movements (uuid,card_id,board_id,from_column,to_column,actor_id,at) VALUES",
   moveRows.join(",\n") + ";",

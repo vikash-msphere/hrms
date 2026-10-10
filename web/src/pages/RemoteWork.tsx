@@ -19,7 +19,7 @@ import { withNewBadge } from "@/components/common/NewBadge";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import type { TableInsight } from "@/components/common/TableInsights";
 import { daysSince, fmtDaysCount, monthKey, monthLabel } from "@/lib/tableDerive";
-import { metaColumns } from "@/components/common/metaColumns";
+import { decisionNoteColumn, metaColumns } from "@/components/common/metaColumns";
 import { Field, FieldRow } from "@/components/common/Field";
 import { WriteDialog } from "@/components/common/WriteDialog";
 import { Segmented } from "@/components/common/Segmented";
@@ -31,8 +31,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { Combobox } from "@/components/ui/combobox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
-import { useConfirm } from "@/components/common/confirm";
-import { confirmDecision } from "@/lib/confirmDecision";
+import { useAskReason, useConfirm } from "@/components/common/confirm";
+import { askDecision } from "@/lib/confirmDecision";
 
 // The ORG's day throughout - the clock the server validates against, and the one `todayStr()` seeds the form
 // with three lines below. The comment above these two used to say the browser-day helpers had been removed
@@ -47,6 +47,10 @@ const endOfWeek = () => {
   return friday < today ? today : friday;
 };
 const upper = (s?: string) => (s ?? "").toUpperCase();
+// Still the requester's to call off: pending, or approved and not started yet (the server draws the same line,
+// on the org's day). These are the caller's live requests; everything else is history.
+const isPending = (r: RemoteWorkRequest) => upper(r.state) === "PENDING";
+const isCancellable = (r: RemoteWorkRequest) => isPending(r) || (upper(r.state) === "APPROVED" && !!r.start_date && r.start_date > todayStr());
 // Half a working month away from the office: the point at which "working remotely" is worth a conversation
 // about arrangements rather than another approval.
 const HEAVY_MONTH_DAYS = 10;
@@ -56,6 +60,7 @@ export default function RemoteWork({ me }: { me: Me }) {
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { toast } = useToast();
   const confirm = useConfirm();
+  const askReason = useAskReason();
   const canCreate = usePermission("remote-work-requests.write");
   const canDecide = usePermission("remote-work-requests.approve");
 
@@ -148,9 +153,10 @@ export default function RemoteWork({ me }: { me: Me }) {
   }
 
   async function action(r: RemoteWorkRequest, verb: "approve" | "reject" | "cancel") {
-    if (!(await confirmDecision(confirm, verb, `${empName(r.employee)}'s remote work from ${formatDate(r.start_date)} to ${formatDate(r.end_date)}`))) return;
+    const body = await askDecision({ confirm, askReason }, verb, `${empName(r.employee)}'s remote work from ${formatDate(r.start_date)} to ${formatDate(r.end_date)}`);
+    if (body === null) return;
     try {
-      await invoke("remote-work-requests/" + idOf(r.path), verb, r.etag);
+      await invoke("remote-work-requests/" + idOf(r.path), verb, r.etag, body);
       toast({ title: `Request ${verb === "cancel" ? "cancelled" : verb === "approve" ? "approved" : "rejected"}`, variant: "success" });
       reload();
     } catch (e) {
@@ -201,16 +207,13 @@ export default function RemoteWork({ me }: { me: Me }) {
     },
   ];
   // History only: the approver's note explains WHY a request landed where it did (esp. rejections).
-  const noteCol: Column<RemoteWorkRequest> = {
-    id: "decision_note", header: "Decision note", accessor: (r) => r.decision_note ?? "",
-    cell: (r) => r.decision_note || <span className="text-muted-foreground">-</span>,
-  };
-  // Requests tab is the caller's own pending remote-work - cancellable. Approve/reject live in the Approvals inbox.
+  const noteCol = decisionNoteColumn<RemoteWorkRequest>();
+  // Requests tab is the caller's own live remote work - cancellable. Approve/reject live in the Approvals inbox.
   const cancelCol: Column<RemoteWorkRequest> = {
     id: "actions", header: "", sortable: false, filter: "none", align: "right",
     cell: (r) => (
       <div className="flex items-center justify-end gap-1">
-        {upper(r.state) === "PENDING" && (
+        {isCancellable(r) && (
           <AccessAction collection="remote-work-requests" objectPath={r.path} verb="cancel" can={r.access?.can} label="Cancel">
             <Button size="sm" variant="ghost" onClick={() => action(r, "cancel")}><Ban className="h-4 w-4" /> Cancel</Button>
           </AccessAction>
@@ -313,6 +316,8 @@ export default function RemoteWork({ me }: { me: Me }) {
         meEmployeeId={me.employee_id}
         canDecide={canDecide}
         accessLabel="Remote-work requests"
+        isLive={isCancellable}
+        isPendingDecision={isPending}
         render={(items, mode, search) =>
           mode === "requests"
             ? renderTable(search, items, requestsCols, "rw-active", "No active requests")

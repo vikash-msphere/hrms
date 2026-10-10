@@ -806,6 +806,9 @@ const VERB_SIDE_EFFECTS: Record<string, string[]> = {
   "reimbursements:approve": ["reimbursements", "notifications"],
   "reimbursements:reject": ["reimbursements", "notifications"],
   "reimbursements:pay": ["reimbursements", "notifications"],
+  // Withdrawing an approved claim a company expense created withdraws that expense too, and the reverse.
+  "reimbursements:cancel": ["reimbursements", "expenses"],
+  "expenses:cancel": ["expenses", "reimbursements"],
   "loans:approve": ["loans", "notifications"],
   "loans:reject": ["loans", "notifications"],
   "loans:disburse": ["loans", "notifications"],

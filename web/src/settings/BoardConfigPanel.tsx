@@ -3,8 +3,9 @@ import { Plus, X, ChevronUp, ChevronDown, Trash2 } from "lucide-react";
 import { invoke, patch, remove } from "@/api";
 import { useResource } from "@/hooks/useResource";
 import { idOf } from "@/lib/utils";
-import type { Board, BoardColumn, BoardMode, SwimlaneMode, WipScope, Label as BoardLabel } from "@/types";
+import type { Board, BoardColumn, BoardMode, SwimlaneMode, WipScope, Label as BoardLabel, TaskType } from "@/types";
 import { LABEL_COLORS, DEFAULT_LABEL_COLOR, nextLabelColor } from "@/lib/labelColors";
+import { TASK_TYPE_ICONS, TaskTypeIcon } from "@/lib/taskTypes";
 import { Field } from "@/components/common/Field";
 import { ColorPicker } from "@/components/common/ColorPicker";
 import { PanelSkeleton } from "@/components/common/Skeletons";
@@ -23,7 +24,7 @@ import { cleanPrefix, prefixError } from "../../../src/domain/boards";
 
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "col";
 
-// Per-board configuration (columns / WIP / swimlanes / labels), rendered inline in the settings Sheet from the
+// Per-board configuration (columns / WIP / swimlanes / task types / labels), rendered inline in the settings Sheet from the
 // board's gear - the object-scoped counterpart to the org settings panels. `objectPath` is the board's
 // resource path from the deep-link.
 //
@@ -55,6 +56,15 @@ function BoardConfigForm({ board, onClose, onSaved }: { board: Board; onClose?: 
   const [cols, setCols] = useState<BoardColumn[]>(() => board.columns.map((c) => ({ ...c })));
   const [mode, setMode] = useState<SwimlaneMode>(board.swimlane_mode);
   const [labelCat, setLabelCat] = useState<BoardLabel[]>(() => board.labels.map((l) => ({ ...l })));
+  // A type added here has no key until save, which slugs its label (see `typeKeys` there).
+  const [types, setTypes] = useState<TaskType[]>(() => (board.task_types ?? []).map((t) => ({ ...t })));
+  const [typeDisplay, setTypeDisplay] = useState<NonNullable<Board["task_type_display"]>>(board.task_type_display ?? "icon");
+  const setType = (i: number, patch: Partial<TaskType>) => setTypes((ts) => ts.map((t, j) => (j === i ? { ...t, ...patch } : t)));
+  const moveType = (i: number, d: -1 | 1) => setTypes((ts) => {
+    const j = i + d;
+    if (j < 0 || j >= ts.length) return ts;
+    const n = [...ts]; [n[i], n[j]] = [n[j]!, n[i]!]; return n;
+  });
   const [lanes, setLanes] = useState(() => board.swimlanes.map((s) => ({ ...s })));
   const [hideEmpty, setHideEmpty] = useState(!!board.hide_empty_lanes);
   const [reassignLane, setReassignLane] = useState(!!board.reassign_lane_on_move);
@@ -109,7 +119,7 @@ function BoardConfigForm({ board, onClose, onSaved }: { board: Board; onClose?: 
 
   // Local drafts come straight from the board prop (no async load), so the baseline is ready immediately.
   const { markSaved } = useUnsaved(
-    { name, description, prefix, boardMode, cols, mode, labelCat, lanes, hideEmpty, reassignLane, noLaneLabel },
+    { name, description, prefix, boardMode, cols, mode, labelCat, types, typeDisplay, lanes, hideEmpty, reassignLane, noLaneLabel },
     true,
     save,
   );
@@ -166,6 +176,17 @@ function BoardConfigForm({ board, onClose, onSaved }: { board: Board; onClose?: 
         return { ...it, key: k };
       });
     };
+    // Task types: a card stores its type's KEY, so a type that already has one keeps it whatever its label or
+    // position becomes; only a type added in this panel gets a key, slugged from its label and nudged clear of
+    // every key already taken - the incumbent rule the columns above follow, for the same reason.
+    const typeKeys = new Set(types.filter((t) => t.key).map((t) => t.key));
+    const taskTypes = types.map((t) => {
+      if (t.key) return t;
+      let k = slug(t.label);
+      while (typeKeys.has(k)) k = `${k}_`;
+      typeKeys.add(k);
+      return { ...t, key: k };
+    });
     // Name/description are a plain PATCH (do it first, while the etag is fresh); the structural config goes
     // through the :configure verb (which doesn't gate on the etag).
     const detailsChanged = name.trim() !== board.name || description.trim() !== (board.description ?? "") || boardMode !== board.mode || typedPrefix !== board.task_prefix;
@@ -178,6 +199,8 @@ function BoardConfigForm({ board, onClose, onSaved }: { board: Board; onClose?: 
         swimlane_mode: mode,
         swimlanes: mode === "custom" ? unique(lanes) : board.swimlanes,
         labels: unique(labelCat),
+        task_types: taskTypes,
+        task_type_display: typeDisplay,
         hide_empty_lanes: hideEmpty,
         reassign_lane_on_move: reassignLane,
         no_lane_label: mode === "custom" ? noLaneLabel.trim() : board.no_lane_label ?? "",
@@ -205,6 +228,7 @@ function BoardConfigForm({ board, onClose, onSaved }: { board: Board; onClose?: 
           <TabsTrigger value="details">Details</TabsTrigger>
           <TabsTrigger value="columns">Columns</TabsTrigger>
           <TabsTrigger value="swimlanes">Swimlanes</TabsTrigger>
+          <TabsTrigger value="types">Types</TabsTrigger>
           <TabsTrigger value="labels">Labels</TabsTrigger>
           {canShare && <TabsTrigger value="sharing">Sharing</TabsTrigger>}
         </TabsList>
@@ -284,6 +308,7 @@ function BoardConfigForm({ board, onClose, onSaved }: { board: Board; onClose?: 
               <SelectItem value="assignee">By assignee</SelectItem>
               <SelectItem value="goal">By goal</SelectItem>
               <SelectItem value="priority">By priority</SelectItem>
+              <SelectItem value="task_type">By task type</SelectItem>
               <SelectItem value="department">By department</SelectItem>
               <SelectItem value="custom">Custom lanes</SelectItem>
             </SelectContent>
@@ -306,6 +331,40 @@ function BoardConfigForm({ board, onClose, onSaved }: { board: Board; onClose?: 
               <label className="flex items-center gap-2 text-sm"><Checkbox checked={reassignLane} onCheckedChange={(v) => setReassignLane(v === true)} /> Allow swimlane change when moving between columns</label>
             </div>
           )}
+        </TabsContent>
+
+        <TabsContent value="types" className="mt-3 space-y-2">
+          <div className="flex items-start justify-between gap-3">
+            <p className="text-xs text-muted-foreground">What kind of work a task is. Each task carries one; removing a type leaves its tasks untyped.</p>
+            <Button size="sm" variant="outline" className="shrink-0" onClick={() => setTypes((ts) => [...ts, { key: "", label: "New type", color: nextLabelColor(ts.map((x) => x.color)), icon: "task" }])}><Plus className="h-3.5 w-3.5" /> Add type</Button>
+          </div>
+          <Field label="Show on task cards">
+            <Select value={typeDisplay} onValueChange={(v) => setTypeDisplay(v as typeof typeDisplay)}>
+              <SelectTrigger className="w-56"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="icon">Icon</SelectItem>
+                <SelectItem value="label">Name</SelectItem>
+                <SelectItem value="both">Icon and name</SelectItem>
+              </SelectContent>
+            </Select>
+          </Field>
+          {types.map((t, i) => (
+            <div key={i} className="editor-row">
+              <Select value={t.icon ?? ""} onValueChange={(icon) => setType(i, { icon })}>
+                <SelectTrigger className="h-8 w-14" aria-label={`Icon for ${t.label || "this type"}`}><TaskTypeIcon type={t} /></SelectTrigger>
+                <SelectContent>
+                  {TASK_TYPE_ICONS.map(({ name, label }) => (
+                    <SelectItem key={name} value={name}><span className="flex items-center gap-2"><TaskTypeIcon type={{ label, icon: name, color: t.color }} /> {label}</span></SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Input value={t.label} onChange={(e) => setType(i, { label: e.target.value })} className="editor-row-main h-8" placeholder="Type name" />
+              <ColorPicker value={t.color ?? DEFAULT_LABEL_COLOR} presets={LABEL_COLORS} label={`Color for ${t.label || "this type"}`} onChange={(color) => setType(i, { color })} />
+              <Button size="icon" variant="ghost" aria-label="Move this type up" className="h-7 w-7" onClick={() => moveType(i, -1)} disabled={i === 0}><ChevronUp className="h-4 w-4" /></Button>
+              <Button size="icon" variant="ghost" aria-label="Move this type down" className="h-7 w-7" onClick={() => moveType(i, 1)} disabled={i === types.length - 1}><ChevronDown className="h-4 w-4" /></Button>
+              <Button size="icon" variant="ghost" aria-label="Remove this type" className="h-7 w-7 text-destructive" onClick={() => setTypes((ts) => ts.filter((_, j) => j !== i))}><X className="h-4 w-4" /></Button>
+            </div>
+          ))}
         </TabsContent>
 
         <TabsContent value="labels" className="mt-3 space-y-2">

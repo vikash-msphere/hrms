@@ -8,6 +8,7 @@ import {
   type EncashmentInput,
 } from "../services/leaveEncashments";
 import { toLeaveEncashmentResource } from "../http/serialize";
+import { rejectBody, type RejectBody } from "../http/rejectBody";
 
 // HR-driven only (gated by grants: only hr_admin holds write). Payout is always via payroll, so there is no
 // :pay verb - approved rows are swept into the next run.
@@ -41,7 +42,7 @@ export const leaveEncashments = collectionRoutes<EncashmentInput, typeof schema.
   },
   verbs: {
     approve: { run: (deps, user, id, _body, c) => approveEncashment(deps, user, id, c.req.header("If-Match")) },
-    reject: { run: (deps, user, id, _body, c) => rejectEncashment(deps, user, id, c.req.header("If-Match")) },
+    reject: { schema: rejectBody, run: (deps, user, id, body: RejectBody, c) => rejectEncashment(deps, user, id, body.reason, c.req.header("If-Match")) },
     cancel: { run: (deps, user, id) => cancelEncashment(deps, user, id) },
   },
 });

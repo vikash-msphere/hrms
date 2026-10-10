@@ -9,6 +9,7 @@ import {
 import { putAttachment, downloadAttachment, attachedObjectIds, attachmentDisposition } from "../services/attachments";
 import { requireCappedBody } from "../services/documentsCommon";
 import { toTaxDeclarationResource } from "../http/serialize";
+import { rejectBody, type RejectBody } from "../http/rejectBody";
 
 const COL = "tax-declarations";
 const PROOF = "proof"; // attachment slot for a declaration's proof document
@@ -50,7 +51,7 @@ export const taxDeclarations = collectionRoutes<TaxDeclarationInput, typeof sche
     // The ETag rides through: verifying is a decision about a row its own employee may still be editing, so it
     // is refused when that row has moved since the verifier read it (services/taxDeclarations.ts says why).
     verify: { schema: verifySchema, run: (deps, user, id, body, c) => verifyTaxDeclaration(deps, user, id, body.verified_amount, c.req.header("If-Match")) },
-    reject: { run: (deps, user, id, _body, c) => rejectTaxDeclaration(deps, user, id, c.req.header("If-Match")) },
+    reject: { schema: rejectBody, run: (deps, user, id, body: RejectBody, c) => rejectTaxDeclaration(deps, user, id, body.reason, c.req.header("If-Match")) },
     upload: {
       run: async (deps, user, id, _body, c) => {
         const bytes = new Uint8Array(await requireCappedBody(c.req.raw));

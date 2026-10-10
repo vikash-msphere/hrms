@@ -29,6 +29,7 @@ const createSchema = z.object({
   description: z.string().nullable().optional(),
   assignee: z.string().nullable().optional(),
   priority: priorityEnum.optional(),
+  task_type: z.string().nullable().optional(),
   labels: z.array(z.string()).optional(),
   documents: z.array(z.string()).optional(),
   size: z.number().nullable().optional(),
@@ -45,6 +46,7 @@ const updateSchema = z.object({
   swimlane_key: z.string().nullable().optional(),
   assignee: z.string().nullable().optional(),
   priority: priorityEnum.optional(),
+  task_type: z.string().nullable().optional(),
   labels: z.array(z.string()).optional(),
   documents: z.array(z.string()).optional(),
   size: z.number().nullable().optional(),
@@ -52,7 +54,7 @@ const updateSchema = z.object({
   goal: z.string().nullable().optional(),
   cadence: cadenceEnum.nullable().optional(),
 }).strict();
-const moveSchema = z.object({ to_column: z.string().min(1), to_swimlane: z.string().nullable().optional(), rank: z.number().optional(), to_assignee: z.string().nullable().optional(), to_goal: z.string().nullable().optional(), to_priority: z.string().nullable().optional(), to_department: z.string().nullable().optional(), to_sprint: z.string().nullable().optional() }).strict();
+const moveSchema = z.object({ to_column: z.string().min(1), to_swimlane: z.string().nullable().optional(), rank: z.number().optional(), to_assignee: z.string().nullable().optional(), to_goal: z.string().nullable().optional(), to_priority: z.string().nullable().optional(), to_task_type: z.string().nullable().optional(), to_department: z.string().nullable().optional(), to_sprint: z.string().nullable().optional() }).strict();
 const blockSchema = z.object({ reason: z.string().nullable().optional(), blocked_by: z.string().nullable().optional() }).strict();
 const assignSchema = z.object({ assignee: z.string().nullable().optional() }).strict();
 const prioritizeSchema = z.object({ priority: priorityEnum }).strict();
@@ -105,6 +107,7 @@ export const cards = collectionRoutes<CardInput, typeof schema.cards>({
         assignee: b.to_assignee,
         goal: b.to_goal,
         priority: b.to_priority,
+        taskType: b.to_task_type,
         department: b.to_department,
         sprint: b.to_sprint,
       }, c.req.header("If-Match")),

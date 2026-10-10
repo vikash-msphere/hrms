@@ -26,6 +26,7 @@ export type TaxDeclarations = {
   verifiedTds?: number;
   decidedBy?: string;
   decidedAt?: string;
+  rejectionReason?: string; // why a REJECTED declaration was not accepted, shown to the employee
 };
 type PayComp = typeof schema.payComponents.$inferSelect;
 

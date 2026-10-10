@@ -10,7 +10,7 @@ import type { Bindings, AppUser } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
 import { seedManifest } from "./seedManifest";
 import { genId } from "../src/lib/idCodec";
-import { createBoard } from "../src/services/boards";
+import { createBoard, configureBoard } from "../src/services/boards";
 import { createCard, moveCard, commentCard, setCardBlocked, watchCard, rollRecurringCards } from "../src/services/cards";
 import { createGoal, updateGoalProgress, commentGoal, watchGoal, setGoalConfidence } from "../src/services/goals";
 
@@ -150,19 +150,43 @@ describe("goal watchers", () => {
     expect(types).toEqual(["goal.at_risk", "goal.comment", "goal.progress"]);
   });
 
-  it("never tells the goal's owner as a watcher - they are told directly or are the one acting", async () => {
+  it("tells an owner watching their own goal what OTHERS do to it, and never their own moves", async () => {
     const owner = await seedActor("Owner");
     const other = await seedWatcher("Other");
     const goal = await createGoal(deps, owner, { title: "Mine" });
-    // Somebody adds the OWNER as a watcher of their own goal (nothing forbids it).
-    await deps.db.insert(schema.goalWatchers).values({ goalId: goal.uuid, employeeId: owner.employeeId! });
+    await watchGoal(deps, owner, goal.uuid, true);
     await watchGoal(deps, other, goal.uuid, true);
 
+    // Somebody else moving or flagging the goal reaches nobody directly, so the watching owner hears it.
     await updateGoalProgress(deps, other, goal.uuid, 20);
-    expect((await notifsFor(owner.employeeId!)).filter((n) => n.type === "goal.progress").length).toBe(0);
-    // The watcher who is not the owner still hears it.
+    await setGoalConfidence(deps, other, goal.uuid, "at_risk", "vendor slipped");
+    expect((await notifsFor(owner.employeeId!)).map((n) => n.type).sort()).toEqual(["goal.at_risk", "goal.progress"]);
+    // The owner's own move is theirs: the other watcher hears it, the owner does not.
     await updateGoalProgress(deps, owner, goal.uuid, 30);
+    expect((await notifsFor(owner.employeeId!)).filter((n) => n.type === "goal.progress").length).toBe(1);
     expect((await notifsFor(other.employeeId!)).filter((n) => n.type === "goal.progress").length).toBe(1);
+  });
+
+  it("does not tell a watching owner twice about a comment: the direct notification already reached them", async () => {
+    const owner = await seedActor("Owner");
+    const other = await seedWatcher("Other");
+    const goal = await createGoal(deps, owner, { title: "Mine" });
+    await watchGoal(deps, owner, goal.uuid, true);
+
+    await commentGoal(deps, other, goal.uuid, "how is it going?");
+    expect((await notifsFor(owner.employeeId!)).filter((n) => n.type === "goal.comment").length).toBe(1);
+  });
+
+  it("does not tell a watching manager twice about a completion: emitGoalProgress already told them", async () => {
+    const mgr = await seedActor("Manager");
+    const owner = await seedActor("Owner");
+    await deps.db.update(schema.employees).set({ managerId: mgr.employeeId }).where(eq(schema.employees.uuid, owner.employeeId!));
+    const goal = await createGoal(deps, owner, { title: "Ship it" });
+    await watchGoal(deps, mgr, goal.uuid, true);
+
+    await updateGoalProgress(deps, owner, goal.uuid, 100, "completed");
+    const types = (await notifsFor(mgr.employeeId!)).map((n) => n.type);
+    expect(types).toEqual(["goal.completed"]);
   });
 });
 
@@ -222,6 +246,27 @@ describe("recurring cards", () => {
     expect((await deps.db.select().from(schema.cards).where(eq(schema.cards.uuid, card.uuid)))[0]!.cadence).toBe("weekly");
     await deps.db.update(schema.boards).set({ deleteTime: null }).where(eq(schema.boards.uuid, board.uuid));
     expect(await rollRecurringCards(deps)).toBe(1);
+  });
+
+  it("carries the task type to the next one, and rolls untyped when the board has since dropped it", async () => {
+    // createCard refuses a type the board does not offer, and a create that throws after the claim is the
+    // series-eating outcome the claim exists to prevent - so a dropped type must not reach it.
+    const owner = await seedActor("Owner");
+    const board = await createBoard(deps, owner, { name: "Ops" });
+    const cols = JSON.parse((await deps.db.select().from(schema.boards).where(eq(schema.boards.uuid, board.uuid)).limit(1))[0]!.columnsJson) as { key: string }[];
+    const deliver = (id: string) => moveCard(deps, owner, id, { column: cols[cols.length - 1]!.key });
+    const first = await createCard(deps, owner, { board: `boards/${board.uuid}`, title: "Weekly sweep", due_date: "2026-01-01", cadence: "weekly", task_type: "chore" });
+    await deliver(first.uuid);
+    expect(await rollRecurringCards(deps)).toBe(1);
+    const second = (await deps.db.select().from(schema.cards).where(eq(schema.cards.boardId, board.uuid))).find((c) => c.uuid !== first.uuid)!;
+    expect(second.taskType).toBe("chore");
+
+    await configureBoard(deps, owner, board.uuid, { task_types: [{ key: "bug", label: "Bug" }] });
+    await deliver(second.uuid);
+    expect(await rollRecurringCards(deps)).toBe(1);
+    const third = (await deps.db.select().from(schema.cards).where(eq(schema.cards.boardId, board.uuid))).find((c) => c.uuid !== first.uuid && c.uuid !== second.uuid)!;
+    expect(third.taskType).toBeNull();
+    expect(third.cadence).toBe("weekly");
   });
 
   it("leaves an undelivered recurring card alone - a late chore is chased, not duplicated", async () => {

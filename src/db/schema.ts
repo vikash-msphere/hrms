@@ -556,6 +556,7 @@ export const leaveRequests = sqliteTable("leave_requests", {
   source: text("source", { enum: ["app", "import"] }).notNull().default("app"),
   reason: text("reason"),
   decidedBy: text("decided_by").references(() => users.uuid),
+  decisionNote: text("decision_note"), // why it was rejected - required on every rejection (http/rejectBody.ts)
   // Policy rules this request broke that the org has chosen to WARN on rather than refuse (`soft_rules` in
   // domain/leaveRestrictions.ts): `[{ code, message }]`. Recorded at create time and shown to whoever approves
   // it - a waiver nobody sees is not a waiver, it is a rule that quietly does nothing. Null = broke nothing.
@@ -1313,10 +1314,13 @@ export const boards = sqliteTable("boards", {
   // same board; the columns/cards/WIP/movements machinery is shared - only the view + analytics differ.
   mode: text("mode", { enum: ["kanban", "scrum"] }).notNull().default("kanban"),
   columnsJson: text("columns_json").notNull().default("[]"), // BoardColumn[]
-  swimlaneMode: text("swimlane_mode", { enum: ["none", "assignee", "goal", "priority", "department", "custom"] }).notNull().default("none"),
+  swimlaneMode: text("swimlane_mode", { enum: ["none", "assignee", "goal", "priority", "task_type", "department", "custom"] }).notNull().default("none"),
   swimlanesJson: text("swimlanes_json").notNull().default("[]"), // Swimlane[] (used when swimlaneMode = custom)
   noLaneLabel: text("no_lane_label"), // custom mode only: label for the catch-all bucket (default "No lane")
   labelsJson: text("labels_json").notNull().default("[]"), // Label[] catalog {key,label,color}; cards reference keys
+  taskTypesJson: text("task_types_json").notNull().default("[]"), // TaskType[] catalog {key,label,color,icon}; a card names one key
+  // How a task tile shows its type: the glyph, the type's name, or both.
+  taskTypeDisplay: text("task_type_display", { enum: ["icon", "label", "both"] }).notNull().default("icon"),
   // Swimlane display prefs (board view): hide lanes with no visible cards.
   hideEmptyLanes: integer("hide_empty_lanes", { mode: "boolean" }).notNull().default(false),
   // When on, dragging a card into another swimlane's cell reassigns the lane (custom → swimlane_key,
@@ -1386,6 +1390,9 @@ export const cards = sqliteTable("cards", {
   // a fact about the past: correcting it would rewrite who raised the work.
   reporterId: text("reporter_id").references(() => employees.uuid),
   priority: text("priority", { enum: ["low", "medium", "high", "urgent"] }).notNull().default("medium"),
+  // What kind of work it is: a key into the board's task-type catalog (bug, feature, chore). Null = untyped,
+  // which every card filed before types existed is. A key the board later drops reads as untyped too.
+  taskType: text("task_type"),
   labelsJson: text("labels_json").notNull().default("[]"), // string[] of board label-catalog keys
   documentsJson: text("documents_json").notNull().default("[]"), // string[] of org-document uuids linked to this card (link-only; no card-owned storage)
   size: integer("size"), // estimate / story points
@@ -1778,6 +1785,7 @@ export const timeEntries = sqliteTable("time_entries", {
   billable: integer("billable", { mode: "boolean" }).notNull().default(true),
   status: text("status", { enum: ["DRAFT", "SUBMITTED", "APPROVED", "REJECTED"] }).notNull().default("DRAFT"),
   decidedBy: text("decided_by").references(() => users.uuid),
+  decisionNote: text("decision_note"), // why the last decision rejected it; cleared by the next decision
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
@@ -1802,6 +1810,7 @@ export const loans = sqliteTable("loans", {
   startDate: integer("start_date", { mode: "timestamp_ms" }),
   status: text("status", { enum: ["PENDING", "APPROVED", "DISBURSED", "CLOSED", "REJECTED"] }).notNull().default("PENDING"),
   decidedBy: text("decided_by").references(() => users.uuid),
+  decisionNote: text("decision_note"), // why it was rejected - required on every rejection (http/rejectBody.ts)
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
@@ -1856,6 +1865,7 @@ export const taxDeclarations = sqliteTable("tax_declarations", {
   status: text("status", { enum: ["DECLARED", "VERIFIED", "REJECTED"] }).notNull().default("DECLARED"),
   note: text("note"),
   decidedBy: text("decided_by").references(() => users.uuid),
+  decisionNote: text("decision_note"), // the verifier's reason for a rejection; cleared by a verify
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
@@ -2738,6 +2748,7 @@ export const leaveEncashments = sqliteTable("leave_encashments", {
   currency: text("currency").notNull().default("INR"),
   state: text("state", { enum: ["PENDING", "APPROVED", "REJECTED", "CANCELLED", "PAID"] }).notNull().default("PENDING"),
   decidedBy: text("decided_by").references(() => users.uuid),
+  decisionNote: text("decision_note"), // why it was rejected - required on every rejection (http/rejectBody.ts)
   paidRunId: text("paid_run_id").references((): AnySQLiteColumn => payrollRuns.uuid), // set when paid via a payroll run
   paidAt: integer("paid_at", { mode: "timestamp_ms" }),
   createdAt: created(),
@@ -3032,6 +3043,7 @@ export const reimbursements = sqliteTable("reimbursements", {
   description: text("description"),
   state: text("state", { enum: ["PENDING", "APPROVED", "REJECTED", "CANCELLED", "PAID"] }).notNull().default("PENDING"),
   decidedBy: text("decided_by").references(() => users.uuid),
+  decisionNote: text("decision_note"), // why it was rejected - required on every rejection (http/rejectBody.ts)
   // The advance this claim spends, when the employee was given money UP FRONT for it (a travel float). A
   // `loans` row of kind "advance" - an advance IS a zero-interest short-term loan here, which is why it reuses
   // that machinery rather than becoming a second way for the company to be owed money.
@@ -3373,6 +3385,7 @@ export const attendanceRegularizations = sqliteTable("attendance_regularizations
   reason: text("reason"),
   state: text("state", { enum: ["PENDING", "APPROVED", "REJECTED", "CANCELLED"] }).notNull().default("PENDING"),
   decidedBy: text("decided_by").references(() => users.uuid),
+  decisionNote: text("decision_note"), // why it was rejected - required on every rejection (http/rejectBody.ts)
   createdAt: created(),
   updatedAt: updated(),
 }, (t) => ({ pageIdx: index("attendance_regularizations_page_idx").on(t.createdAt, t.uuid), empIdx: index("attreg_emp_idx").on(t.employeeId, t.createdAt, t.uuid), stateIdx: index("attreg_state_idx").on(t.state) }));

@@ -246,9 +246,10 @@ export type SearchPage = { results: SearchHit[] };
 
 export type WipScope = "column" | "assignee";
 export type BoardColumn = Item<Board["columns"]>;
-export type SwimlaneMode = "none" | "assignee" | "goal" | "priority" | "department" | "custom";
+export type SwimlaneMode = "none" | "assignee" | "goal" | "priority" | "task_type" | "department" | "custom";
 export type Swimlane = Item<Board["swimlanes"]>;
 export type Label = Item<Board["labels"]>;
+export type TaskType = Item<Board["task_types"]>;
 export type BoardMode = "kanban" | "scrum";
 export type Board = Wire<"board">;
 export type CardPriority = "low" | "medium" | "high" | "urgent";

@@ -26,7 +26,8 @@ import { Input } from "@/components/ui/input";
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { AccessAction } from "@/components/access/AccessAction";
 import { AccessItem } from "@/components/access/AccessItem";
-import { useConfirm } from "@/components/common/confirm";
+import { useAskReason, useConfirm } from "@/components/common/confirm";
+import { askDecision } from "@/lib/confirmDecision";
 import { useDeletedToast } from "@/hooks/useSoftDelete";
 import { useToast } from "@/components/ui/use-toast";
 
@@ -43,6 +44,7 @@ export default function Loans({ me }: { me: Me }) {
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { toast } = useToast();
   const confirm = useConfirm();
+  const askReason = useAskReason();
   const deleted = useDeletedToast();
   const { org } = useOrg();
   const money = (n: number) => formatMoney(n, org.default_currency, currencyDecimals(undefined, org));
@@ -107,6 +109,12 @@ export default function Loans({ me }: { me: Me }) {
       toast({ title: "Couldn't update the loan", description: (e as Error).message, variant: "destructive" });
     }
     finally { setActing(null); }
+  }
+  // Approving prices the instalment and queues the payable; rejecting tells the borrower why. Both ask first.
+  async function decide(l: Loan, verb: "approve" | "reject") {
+    const body = await askDecision({ confirm, askReason }, verb, `${empName(l.employee)}'s ${l.kind === "advance" ? "advance" : "loan"} of ${money(l.principal)}`);
+    if (body === null) return;
+    await act(l, verb, body);
   }
   async function del(l: Loan) {
     if (!(await confirm({ title: "Delete this loan request?", destructive: true, confirmLabel: "Delete" }))) return;
@@ -198,6 +206,7 @@ export default function Loans({ me }: { me: Me }) {
                     )}
                   </div>
                   {l.reason && <p className="text-sm text-foreground/80">{l.reason}</p>}
+                  {l.status === "REJECTED" && l.decision_note && <p className="text-sm text-destructive">Rejected: {l.decision_note}</p>}
                   <div className="space-y-1 text-sm">
                     <div className="flex justify-between"><span className="text-muted-foreground">EMI</span><span className="tabular-nums">{l.monthly_amount ? `${money(l.monthly_amount)}/mo · ` : ""}{l.installments} month{l.installments === 1 ? "" : "s"}</span></div>
                     {(l.status === "DISBURSED" || l.status === "CLOSED") && (
@@ -210,8 +219,8 @@ export default function Loans({ me }: { me: Me }) {
                     )}
                   </div>
                   <div className="mt-auto flex flex-wrap gap-2">
-                    {l.status === "PENDING" && can.includes("approve") && <AccessAction verb="approve" can={can} label="Approve loan"><Button size="sm" loading={acting === `${l.path}:approve`} onClick={() => act(l, "approve")}><Check className="h-3.5 w-3.5" /> Approve</Button></AccessAction>}
-                    {l.status === "PENDING" && can.includes("reject") && <AccessAction verb="reject" can={can} label="Reject loan"><Button size="sm" variant="outline" loading={acting === `${l.path}:reject`} onClick={() => act(l, "reject")}><X className="h-3.5 w-3.5" /> Reject</Button></AccessAction>}
+                    {l.status === "PENDING" && can.includes("approve") && <AccessAction verb="approve" can={can} label="Approve loan"><Button size="sm" loading={acting === `${l.path}:approve`} onClick={() => decide(l, "approve")}><Check className="h-3.5 w-3.5" /> Approve</Button></AccessAction>}
+                    {l.status === "PENDING" && can.includes("reject") && <AccessAction verb="reject" can={can} label="Reject loan"><Button size="sm" variant="outline" loading={acting === `${l.path}:reject`} onClick={() => decide(l, "reject")}><X className="h-3.5 w-3.5" /> Reject</Button></AccessAction>}
                     {l.status === "APPROVED" && can.includes("disburse") && <AccessAction verb="disburse" can={can} label="Disburse loan"><Button size="sm" loading={acting === `${l.path}:disburse`} onClick={() => disburse(l)}><Banknote className="h-3.5 w-3.5" /> Mark disbursed</Button></AccessAction>}
                     {l.status === "DISBURSED" && can.includes("recordRepayment") && <AccessAction verb="recordRepayment" can={can} label="Record loan repayment"><Button size="sm" variant="outline" onClick={() => setRepay(l)}>Record repayment</Button></AccessAction>}
                   </div>

@@ -27,7 +27,7 @@ import { TruncationNotice } from "@/components/common/TruncationNotice";
 import { ExportButton } from "@/components/common/ExportButton";
 import { AccessTarget } from "@/components/access/AccessTarget";
 import { RequestLeaveDialog } from "@/components/common/RequestLeaveDialog";
-import { ApprovalRow, RejectDialog, type RejectTarget } from "@/components/common/ApprovalRow";
+import { ApprovalRow, useRejectRequest } from "@/components/common/ApprovalRow";
 import { MonthGrid } from "@/components/calendar/MonthGrid";
 import { TeamGrid } from "@/components/calendar/TeamGrid";
 import { QuarterGrid } from "@/components/calendar/QuarterGrid";
@@ -89,8 +89,8 @@ export default function LeaveCalendar({ me }: { me: Me }) {
     return !m || m === t.slice(0, 7) ? t : `${m}-01`;
   });
   const [draft, setDraft] = useState<{ from: string; to: string } | null>(null);
-  const [rejecting, setRejecting] = useState<RejectTarget | null>(null);
   const [decided, setDecided] = useState<Set<string>>(() => new Set());
+  const reject = useRejectRequest((path) => { setDecided((d) => new Set(d).add(path)); approvals.reload(); reloadLeaves(); });
 
   useEffect(() => { writeUrlQuery("view", view); }, [view]);
   useEffect(() => { writeUrlQuery("m", ymOf(cursor)); }, [cursor]);
@@ -671,7 +671,7 @@ export default function LeaveCalendar({ me }: { me: Me }) {
                     summary={leaveSummary(r, typeName)}
                     context={leaveDecisionContext(r, balances, leaves)}
                     onApproved={(path) => { setDecided((d) => new Set(d).add(path)); approvals.reload(); reloadLeaves(); }}
-                    onRejectClick={() => setRejecting({ collection: "leave-requests", row: r, name: empName(r.employee), summary: leaveSummary(r, typeName) })}
+                    onRejectClick={() => reject({ collection: "leave-requests", row: r, name: empName(r.employee), summary: leaveSummary(r, typeName) })}
                   />
                 ))}
               </div>
@@ -722,11 +722,6 @@ export default function LeaveCalendar({ me }: { me: Me }) {
           onSubmitted={() => { setDraft(null); reloadLeaves(); }}
         />
       )}
-      <RejectDialog
-        target={rejecting}
-        onClose={() => setRejecting(null)}
-        onRejected={(path) => { setDecided((d) => new Set(d).add(path)); approvals.reload(); reloadLeaves(); }}
-      />
     </TooltipProvider>
   );
 }

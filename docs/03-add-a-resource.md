@@ -71,6 +71,10 @@ Template: `leave-requests` (`:approve`, `:reject`, `:cancel`) and `tickets` (twe
   so a missing or non-JSON body parses as `{}`.
 - Use `{ raw(c, id) }` only when the verb does not answer with the resource - it streams bytes or returns a
   receipt - and then it owns its whole Response.
+- A request's `:reject` takes `schema: rejectBody` (`http/rejectBody.ts`): the reason is required, the service
+  runs it through `requireRejectReason` (`services/decisionGuard.ts`), stores it as `decision_note` and puts it
+  in the requester's notification. In the SPA a reject asks through `askRejectReason` / `askDecision`
+  (`lib/confirmDecision.ts`) or `useRejectRequest` (`components/common/ApprovalRow.tsx`), never a bare confirm.
 - The verb name is the access hint: a factory-built collection advertises exactly the verbs it mounted, so
   `ACCESS_VERBS` is not consulted for it.
 - If the action is long-running, return **202** + an Operation (template: `payroll-runs:publish`),

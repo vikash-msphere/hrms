@@ -190,7 +190,7 @@ function collectionOfTable(table: SQLiteTable): string | undefined {
  * edits and would later ask about - not by merely being readable.
  */
 const DIFFABLE_BLOBS: Record<string, string[]> = {
-  boards: ["columnsJson", "swimlanesJson", "labelsJson"],
+  boards: ["columnsJson", "swimlanesJson", "labelsJson", "taskTypesJson"],
   // `ratingsJson` on `reviews` is NOT here, deliberately: it is the manager's competency scoring, withheld
   // from the employee until the review is SHARED (http/serialize.ts toReviewResource), and an audit entry is
   // read through a capability that does not know about that state. `selfRatingsJson` is the employee's own

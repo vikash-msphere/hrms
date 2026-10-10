@@ -1,4 +1,5 @@
-import type { ConfirmFn } from "@/components/common/confirm";
+import type { ReactNode } from "react";
+import type { AskReasonFn, ConfirmFn } from "@/components/common/confirm";
 
 // One place for "are you sure?" on the decision verbs.
 //
@@ -117,4 +118,55 @@ const COPY: Record<Decision, (subject: string, other?: string) => Copy> = {
  *  `other` names the thing this decision displaces, where there is one (see COPY). */
 export function confirmDecision(confirm: ConfirmFn, verb: Decision, subject: string, other?: string): Promise<boolean> {
   return confirm(COPY[verb](subject, other));
+}
+
+/**
+ * Ask before rejecting a REQUEST, and ask why. Every request `:reject` requires a reason (the server refuses one
+ * without), which is stored on the request and sent to the requester - so this is the only way a page rejects a
+ * request, never `confirmDecision(…, "reject", …)`. Resolves to the trimmed reason, or null when the person
+ * backs out (callers just `return`). `detail` is what the row showed about the request, rendered masked.
+ */
+export function askRejectReason(ask: AskReasonFn, subject: string, detail?: ReactNode): Promise<string | null> {
+  return ask({
+    title: "Reject this request?",
+    description: `${subject} is rejected and the requester is told why. They would have to file again.`,
+    detail,
+    reasonLabel: "Reason",
+    placeholder: "What should they know, or change before filing again? They will see this.",
+    confirmLabel: "Reject",
+    destructive: true,
+  });
+}
+
+/**
+ * Ask before any decision verb on a REQUEST, where the verb arrives as a variable (`action(row, verb)`): a
+ * `reject` asks for its reason, everything else asks the ordinary confirmation. Resolves to the body the verb
+ * takes - `{ reason }` for a reject, undefined otherwise - or null when the person backs out:
+ *
+ *     const body = await askDecision({ confirm, askReason }, verb, subject);
+ *     if (body === null) return;
+ *     await invoke(path, verb, etag, body);
+ */
+export async function askDecision(
+  prompts: { confirm: ConfirmFn; askReason: AskReasonFn },
+  verb: Decision,
+  subject: string,
+): Promise<{ reason: string } | undefined | null> {
+  if (verb === "reject") {
+    const reason = await askRejectReason(prompts.askReason, subject);
+    return reason === null ? null : { reason };
+  }
+  return (await confirmDecision(prompts.confirm, verb, subject)) ? undefined : null;
+}
+
+/** The same, for many requests at once: one reason, sent to every requester in the batch. */
+export function askBulkRejectReason(ask: AskReasonFn, count: number, noun = "request"): Promise<string | null> {
+  return ask({
+    title: `Reject ${count} ${noun}${count === 1 ? "" : "s"}?`,
+    description: `Each requester is told why, with the same reason. They would have to file again.`,
+    reasonLabel: "Reason",
+    placeholder: "What should they know, or change before filing again? They will all see this.",
+    confirmLabel: `Reject ${count}`,
+    destructive: true,
+  });
 }

@@ -121,6 +121,6 @@ describe("decisions bound to the reviewed version", () => {
     const me = await person();
     const boss = await person();
     const ot = await createOvertimeRequest(deps, me, { start_time: "2099-01-01T18:00:00Z", end_time: "2099-01-01T20:00:00Z" });
-    await expect(rejectOvertimeRequest(deps, boss, ot.uuid, null, 'W/"1"')).rejects.toThrow(/etag/);
+    await expect(rejectOvertimeRequest(deps, boss, ot.uuid, "Not budgeted", 'W/"1"')).rejects.toThrow(/etag/);
   });
 });

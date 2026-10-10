@@ -12,7 +12,7 @@ import { PageHeader } from "@/components/common/PageHeader";
 import { DataState } from "@/components/common/DataState";
 import { TruncationNotice } from "@/components/common/TruncationNotice";
 import { DataTable, type Column } from "@/components/common/DataTable";
-import { metaColumns } from "@/components/common/metaColumns";
+import { decisionNoteColumn, metaColumns } from "@/components/common/metaColumns";
 import { withNewBadge } from "@/components/common/NewBadge";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { Field } from "@/components/common/Field";
@@ -27,8 +27,8 @@ import { AccessTab } from "@/components/common/AccessTab";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Combobox } from "@/components/ui/combobox";
 import { useToast } from "@/components/ui/use-toast";
-import { useConfirm } from "@/components/common/confirm";
-import { confirmDecision } from "@/lib/confirmDecision";
+import { useAskReason, useConfirm } from "@/components/common/confirm";
+import { askDecision } from "@/lib/confirmDecision";
 
 const COL = "leave-encashments";
 const upper = (s?: string) => (s ?? "").toUpperCase();
@@ -41,6 +41,7 @@ export default function LeaveEncashments({ embedded, initialType, meEmployeeId }
   const { rows: leaveTypes } = useCollection<LeaveType>("leave-types");
   const { toast } = useToast();
   const confirm = useConfirm();
+  const askReason = useAskReason();
   const { org } = useOrg();
   const money = (n: number) => formatMoney(n, org.default_currency, currencyDecimals(undefined, org));
   const canCreate = usePermission(`${COL}.write`);
@@ -188,9 +189,10 @@ export default function LeaveEncashments({ embedded, initialType, meEmployeeId }
 
   async function action(r: LeaveEncashment, verb: "approve" | "reject" | "cancel") {
     const past = { approve: "approved", reject: "rejected", cancel: "cancelled" }[verb];
-    if (!(await confirmDecision(confirm, verb, `${empName(r.employee)}'s encashment of ${r.days} day${r.days === 1 ? "" : "s"}`))) return;
+    const body = await askDecision({ confirm, askReason }, verb, `${empName(r.employee)}'s encashment of ${r.days} day${r.days === 1 ? "" : "s"}`);
+    if (body === null) return;
     try {
-      await invoke(`${COL}/${idOf(r.path)}`, verb, r.etag);
+      await invoke(`${COL}/${idOf(r.path)}`, verb, r.etag, body);
       toast({ title: `Encashment ${past}`, variant: "success" });
       reload();
     } catch (e) {
@@ -256,7 +258,7 @@ export default function LeaveEncashments({ embedded, initialType, meEmployeeId }
   };
 
   const pendingCols = [empCol, ...baseCols, decideCol];
-  const historyCols = withNewBadge([empCol, ...baseCols, ...metaColumns<LeaveEncashment>(), historyActions]);
+  const historyCols = withNewBadge([empCol, ...baseCols, decisionNoteColumn<LeaveEncashment>(), ...metaColumns<LeaveEncashment>(), historyActions]);
 
   const newBtn = canCreate && (
     <AccessAction collection={COL} create label="New encashment">

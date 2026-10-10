@@ -13,7 +13,7 @@ import { StatusBadge } from "@/components/common/StatusBadge";
 import { RowActivityButton } from "@/components/common/RowActivityButton";
 import { TableSkeleton } from "@/components/common/Skeletons";
 import { AccessAction } from "@/components/access/AccessAction";
-import { DecisionButtons, RejectDialog, type Approvable, type RejectTarget } from "@/components/common/ApprovalRow";
+import { DecisionButtons, useRejectRequest, type Approvable } from "@/components/common/ApprovalRow";
 import { describeCorrection } from "@/lib/attendance";
 
 // One person's requests of one kind, on their record: the place an approver's "Open" lands. The self-service
@@ -46,8 +46,6 @@ type Spec<T extends Row> = {
   when: (r: T) => string | undefined;
   status: (r: T) => string | undefined;
   what: (r: T, ctx: Ctx) => React.ReactNode;
-  // The decider's note, where the collection carries one.
-  note?: (r: T) => string | null | undefined;
   // Name lookups a kind needs; read only when a card of that kind is on screen.
   needs?: "leave-types" | "projects" | "reimbursement-categories";
 };
@@ -65,7 +63,6 @@ const SPECS: Record<EmployeeRequestKind, Spec<Row>> = {
     when: (r) => r.start_date,
     status: (r) => r.state,
     what: (r) => `${r.start_date === r.end_date ? formatDate(r.start_date) : `${formatDate(r.start_date)} – ${formatDate(r.end_date)}`} · ${r.days} day${r.days === 1 ? "" : "s"}${r.location ? ` · ${r.location}` : ""}${r.reason ? ` · ${r.reason}` : ""}`,
-    note: (r) => r.decision_note,
   }),
   "late-early-requests": spec<LateEarlyRequest>({
     title: "Late arrival & early departure",
@@ -157,7 +154,8 @@ export const FOCUSED_ROW = "bg-primary/10 outline outline-2 -outline-offset-2 ou
 // buttons and confirmation as the inbox (DecisionButtons), so opening a request from there loses nothing.
 export function EmployeeRequests({ employeeId, employeeName, kind }: { employeeId: string; employeeName: string; kind: EmployeeRequestKind }) {
   const s = SPECS[kind];
-  const [rejecting, setRejecting] = useState<RejectTarget | null>(null);
+  // The decision itself invalidates the collection (api.ts invoke), so the row re-reads as decided.
+  const reject = useRejectRequest();
   const { rows: raw, state } = useCollection<Row>(kind, { params: { employee: `employees/${employeeId}` } });
   const { rows: lookup } = useCollection<{ path: string; display_name?: string; name?: string }>(s.needs ?? "leave-types", { all: true, enabled: !!s.needs });
   const { org } = useOrg();
@@ -208,7 +206,8 @@ export function EmployeeRequests({ employeeId, employeeName, kind }: { employeeI
                 {rows.map((r) => {
                   const focused = idOf(r.path) === focusedId;
                   const status = s.status(r) ?? "";
-                  const note = s.note?.(r);
+                  // The decider's note: every kind here carries one, and a rejection always has it (the reason).
+                  const note = (r as { decision_note?: string }).decision_note;
                   return (
                     <tr key={r.path} ref={focused ? focusRef : undefined} className={cn("border-b last:border-0", focused && FOCUSED_ROW)} aria-current={focused ? "true" : undefined}>
                       {/* Masked from session replay for the reason the approvals row is: amounts and reasons. */}
@@ -223,7 +222,7 @@ export function EmployeeRequests({ employeeId, employeeName, kind }: { employeeI
                             collection={kind}
                             row={r}
                             what={`${employeeName}'s ${s.noun}`}
-                            onRejectClick={() => setRejecting({ collection: kind, row: r, name: employeeName, summary: s.what(r, ctx) })}
+                            onRejectClick={() => reject({ collection: kind, row: r, name: employeeName, summary: s.what(r, ctx) })}
                             buttonClassName="coarse:h-10"
                           />
                           <RowActivityButton resource={r.path} />
@@ -237,8 +236,6 @@ export function EmployeeRequests({ employeeId, employeeName, kind }: { employeeI
           </div>
         )}
       </CardContent>
-      {/* The decision itself invalidates the collection (api.ts invoke), so the row re-reads as decided. */}
-      <RejectDialog target={rejecting} onClose={() => setRejecting(null)} onRejected={() => {}} />
     </Card>
   );
 }

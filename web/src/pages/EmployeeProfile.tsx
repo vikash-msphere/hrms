@@ -34,7 +34,7 @@ import { localDay, trackedFromOf } from "@/lib/attendance";
 import { ActivityFeed } from "@/components/common/ActivityFeed";
 import { EmployeeBonuses } from "@/components/common/EmployeeBonuses";
 import { EmployeeAssets } from "@/components/common/EmployeeAssets";
-import { DecisionButtons, RejectDialog, type RejectTarget } from "@/components/common/ApprovalRow";
+import { DecisionButtons, useRejectRequest } from "@/components/common/ApprovalRow";
 import { EmployeeRequests, FOCUSED_ROW, useFocusedRequest, useScrollToFocused, type EmployeeRequestKind } from "@/components/common/EmployeeRequests";
 import { EmployeeSettlement } from "@/components/common/EmployeeSettlement";
 import { EmployeePayslips } from "@/components/common/EmployeePayslips";
@@ -269,7 +269,8 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
   // history below and scrolled to.
   const focusedLeave = useFocusedRequest("leave-requests");
   const focusedLeaveRef = useScrollToFocused(focusedLeave, sub === "leave" && myLeaves.length > 0);
-  const [rejectingLeave, setRejectingLeave] = useState<RejectTarget | null>(null);
+  // The decision itself invalidates the collection (api.ts invoke), so the row re-reads as decided.
+  const rejectLeave = useRejectRequest();
 
   const onProbation = !!emp?.probation_end_date && Date.parse(emp.probation_end_date) >= Date.now();
 
@@ -854,7 +855,7 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
                                         collection="leave-requests"
                                         row={l}
                                         what={`${emp.first_name} ${emp.last_name}'s leave`}
-                                        onRejectClick={() => setRejectingLeave({ collection: "leave-requests", row: l, name: `${emp.first_name} ${emp.last_name}`, summary: `${typeName(l.leave_type)} · ${formatDate(l.start_date)} – ${formatDate(l.end_date)}` })}
+                                        onRejectClick={() => rejectLeave({ collection: "leave-requests", row: l, name: `${emp.first_name} ${emp.last_name}`, summary: `${typeName(l.leave_type)} · ${formatDate(l.start_date)} – ${formatDate(l.end_date)}` })}
                                         buttonClassName="coarse:h-10"
                                       />
                                     </div>
@@ -867,7 +868,6 @@ export default function EmployeeProfile({ id, me, sub, basePath }: { id: string;
                       </CardContent>
                     </Card>
                   )}
-                  <RejectDialog target={rejectingLeave} onClose={() => setRejectingLeave(null)} onRejected={() => {}} />
                   {leaveRequestKinds.map((k) => <EmployeeRequests key={k} employeeId={id} employeeName={`${emp.first_name} ${emp.last_name}`} kind={k} />)}
                 </TabsContent>
               )}

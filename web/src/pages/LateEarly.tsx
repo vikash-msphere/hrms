@@ -29,7 +29,7 @@ import { RequestsHistoryTabs, type RequestsHistorySearch } from "@/components/co
 import { RowActivityButton } from "@/components/common/RowActivityButton";
 import { withNewBadge } from "@/components/common/NewBadge";
 import { DataTable, type Column } from "@/components/common/DataTable";
-import { metaColumns } from "@/components/common/metaColumns";
+import { decisionNoteColumn, metaColumns } from "@/components/common/metaColumns";
 import { daysSince, fmtDaysCount, monthKey, monthLabel } from "@/lib/tableDerive";
 import { Field, FieldRow } from "@/components/common/Field";
 import { WriteDialog } from "@/components/common/WriteDialog";
@@ -41,6 +41,10 @@ import { checkFiling, hhmmOf, minOfDay } from "../../../src/domain/punctuality";
 
 const upper = (s?: string) => (s ?? "").toUpperCase();
 const LIVE = new Set(["PENDING", "APPROVED"]);
+// Still the requester's to call off: pending, or approved for today or a later day (the server's line - a day
+// that is over keeps its decision). These are the caller's live requests; everything else is history.
+const isPending = (r: LateEarlyRequest) => upper(r.state) === "PENDING";
+const isCancellable = (r: LateEarlyRequest) => isPending(r) || (upper(r.state) === "APPROVED" && !!r.date && r.date >= todayStr());
 
 type Form = { employee: string; date: string; kind: LateEarlyKind; at: string; reason: string };
 /** What another page hands over when it opens this form (the attendance grid's "Request late arrival"). */
@@ -189,16 +193,14 @@ export default function LateEarly({ me }: { me: Me }) {
       },
     },
   ];
-  const noteCol: Column<LateEarlyRequest> = {
-    id: "decision_note", header: "Decision note", accessor: (r) => r.decision_note ?? "",
-    cell: (r) => r.decision_note || <span className="text-muted-foreground">-</span>,
-  };
-  // The Requests tab is the caller's own live requests - cancellable while pending. Deciding lives in Approvals.
+  const noteCol = decisionNoteColumn<LateEarlyRequest>();
+  // The Requests tab is the caller's own live requests - cancellable until their day is over. Deciding lives in
+  // Approvals.
   const cancelCol: Column<LateEarlyRequest> = {
     id: "actions", header: "", sortable: false, filter: "none", align: "right",
     cell: (r) => (
       <div className="flex items-center justify-end gap-1">
-        {upper(r.state) === "PENDING" && (
+        {isCancellable(r) && (
           <AccessAction collection="late-early-requests" objectPath={r.path} verb="cancel" can={r.access?.can} label="Cancel">
             <Button size="sm" variant="ghost" onClick={() => cancel(r)}><Ban className="h-4 w-4" /> Cancel</Button>
           </AccessAction>
@@ -271,6 +273,8 @@ export default function LateEarly({ me }: { me: Me }) {
         meEmployeeId={me.employee_id}
         canDecide={canDecide}
         accessLabel="Late arrival and early departure requests"
+        isLive={isCancellable}
+        isPendingDecision={isPending}
         render={(items, mode, search) =>
           mode === "requests"
             ? renderTable(search, items, requestsCols, "le-active", "No active requests")

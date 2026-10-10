@@ -13,7 +13,7 @@ import { orgToday, dayStartMs } from "./orgDay";
 import { refHolidays } from "../lib/refData";
 import { keysetPage } from "./keysetPage";
 import { restateLopForDay } from "./payroll";
-import { assertNotSubject, assertReviewedVersion } from "./decisionGuard";
+import { assertNotSubject, assertReviewedVersion, requireRejectReason } from "./decisionGuard";
 import { invalidArgument, notFound, failedPrecondition } from "../lib/errors";
 import { DEFAULT_ATTENDANCE, localMinutes, utcDay, type AttendanceConfig } from "../domain/attendance";
 import {
@@ -23,7 +23,8 @@ import {
 import { scheduleCtxWith } from "./workSchedule";
 
 // Late arrival / early departure requests: an employee asks to come in late or leave early on one working day;
-// a manager (own dept) or HR approves or rejects it; the owner cancels it while it is pending. Who may do which
+// a manager (own dept) or HR approves or rejects it; the owner cancels it while it is pending, or once approved
+// until the day is over (they turned up on time after all). Who may do which
 // is the verb's grant (middleware). The service decides only what the ORG'S POLICY decides - whether the
 // request may be filed at all, whether it is past the monthly allowance, whether it is approved on filing
 // (settings/punctuality, domain/punctuality.ts#checkFiling) - plus the state machine and maker-checker.
@@ -190,21 +191,31 @@ export async function createLateEarlyRequest(deps: Deps, actor: AppUser, input: 
 
 async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "REJECTED" | "CANCELLED", note?: string | null, ifMatch?: string): Promise<Row> {
   const row = await getRequest(deps, id);
-  if (row.state !== "PENDING") throw failedPrecondition(to === "CANCELLED" ? "only pending requests can be cancelled" : "request is not pending");
+  const stuck = to === "CANCELLED" ? "only pending requests, or approved ones for today or later, can be cancelled" : "request is not pending";
+  // Cancel also withdraws an APPROVED request (an auto-approved one included) up to the end of its day: somebody
+  // who said they would be late and then was not hands the excusal back. A day that is over stays as judged -
+  // it is history, and the payroll that read it may already be published.
+  if (to === "CANCELLED" && row.state === "APPROVED") {
+    if (+new Date(row.date) < dayStartMs(await orgToday(deps))) throw failedPrecondition("an approved request for a day that is over cannot be cancelled");
+  } else if (row.state !== "PENDING") {
+    throw failedPrecondition(stuck);
+  }
   assertReviewedVersion(row, ifMatch);
   // An approval changes how the day is judged and, under the org's policy, what it pays - so the person it is
   // about may not be the one approving it.
   if (to === "APPROVED") await assertNotSubject(deps, actor, row.employeeId, "approve", "late arrival / early departure request");
-  // Guard the flip on PENDING so the decision is EXACTLY-ONCE: a double-clicked or concurrent call that also read
-  // PENDING loses here (0 rows) instead of firing the notification, the event and the restatement twice.
+  // Guard the flip on the state just validated so the decision is EXACTLY-ONCE: a double-clicked or concurrent
+  // call that also read it loses here (0 rows) instead of firing the notification, the event and the
+  // restatement twice.
+  const from = row.state;
   const [updated] = await deps.db
     .update(schema.lateEarlyRequests)
     .set({ state: to, decidedBy: to === "CANCELLED" ? null : actor.uuid, decisionNote: note?.trim() || null, updatedAt: new Date() })
-    .where(and(eq(schema.lateEarlyRequests.uuid, id), eq(schema.lateEarlyRequests.state, "PENDING")))
+    .where(and(eq(schema.lateEarlyRequests.uuid, id), eq(schema.lateEarlyRequests.state, from)))
     .returning();
-  if (!updated) throw failedPrecondition(to === "CANCELLED" ? "only pending requests can be cancelled" : "request is not pending");
+  if (!updated) throw failedPrecondition(stuck);
   const ymd = utcDay(+new Date(row.date));
-  await audit(deps, actor, `late_early_request.${to.toLowerCase()}`, "late-early-requests", id, stateMeta(row.state, to, { employee: `employees/${row.employeeId}`, date: ymd, ...(note ? { reason: note } : {}) }), updated);
+  await audit(deps, actor, `late_early_request.${to.toLowerCase()}`, "late-early-requests", id, stateMeta(from, to, { employee: `employees/${row.employeeId}`, date: ymd, ...(note ? { reason: note } : {}) }), updated);
   const subject = `late-early-requests/${id}`;
   if (to === "APPROVED" || to === "REJECTED") {
     const what = `${KIND_LABEL[row.kind]} on ${ymd} at ${row.at}`;
@@ -217,11 +228,13 @@ async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "
     // rebuild. Best-effort (payroll.ts#restateLopForDay says why).
     await restateLopForDay(deps, row.employeeId, +new Date(row.date));
   }
+  // Withdrawing an approved excusal judges the day without it again - the same restatement the other way.
+  if (to === "CANCELLED" && from === "APPROVED") await restateLopForDay(deps, row.employeeId, +new Date(row.date));
   return updated;
 }
 
 export const approveLateEarlyRequest = (deps: Deps, actor: AppUser, id: string, note?: string | null, ifMatch?: string) => decide(deps, actor, id, "APPROVED", note, ifMatch);
-export const rejectLateEarlyRequest = (deps: Deps, actor: AppUser, id: string, note?: string | null, ifMatch?: string) => decide(deps, actor, id, "REJECTED", note, ifMatch);
+export const rejectLateEarlyRequest = async (deps: Deps, actor: AppUser, id: string, reason: string, ifMatch?: string) => decide(deps, actor, id, "REJECTED", requireRejectReason(reason), ifMatch);
 export const cancelLateEarlyRequest = (deps: Deps, actor: AppUser, id: string) => decide(deps, actor, id, "CANCELLED");
 
 /**

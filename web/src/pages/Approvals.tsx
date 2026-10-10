@@ -24,19 +24,17 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { describeCorrection } from "@/lib/attendance";
-import { useConfirm } from "@/components/common/confirm";
-import { confirmDecision } from "@/lib/confirmDecision";
+import { useAskReason, useConfirm } from "@/components/common/confirm";
+import { askBulkRejectReason, askRejectReason } from "@/lib/confirmDecision";
 import { bulkInvoke, mergeBulkResults, bulkSummary } from "@/lib/bulk";
 import { Badge } from "@/components/ui/badge";
-import { Textarea } from "@/components/ui/textarea";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
 import type { Employee, LeaveRequest, LeaveType, LeaveBalance, ReimbursementCategory, Project, Me, Reimbursement, OvertimeRequest, RemoteWorkRequest, LateEarlyRequest, AttendanceRegularization, LeaveEncashment, Loan, TimeEntry, Expense, AssetCategory, AssetRequest } from "@/types";
 import { KIND_LABEL, fmtMinutes, type LateEarlyKind } from "@/lib/lateEarly";
 import type { ApprovalsBuckets, TaxVerification } from "@/lib/approvals";
 import { TruncationNotice } from "@/components/common/TruncationNotice";
 import { leaveDecisionContext, leaveSummary } from "@/lib/leaveApproval";
-import { ApprovalRow, DecidedBadge, RejectDialog, waitingDays, waitingLabel, type Approvable, type RejectTarget } from "@/components/common/ApprovalRow";
+import { ApprovalRow, DecidedBadge, useRejectRequest, waitingDays, waitingLabel, type Approvable } from "@/components/common/ApprovalRow";
 
 // A single inbox tab. `summary`/`context` erase to accept the heterogeneous union; the group() factory below
 // preserves each tab's concrete row type at the call site so a renamed/removed field fails the typecheck.
@@ -55,13 +53,17 @@ function group<T extends Approvable>(g: { key: string; label: string; icon: Luci
 function TaxVerificationsCard({ rows, money, canDecide, onDone }: { rows: TaxVerification[]; money: (n: number) => string; canDecide: boolean; onDone: () => void }) {
   const { toast } = useToast();
   const [busy, setBusy] = useState<string | null>(null);
-  const confirm = useConfirm();
+  const askReason = useAskReason();
   async function decide(v: TaxVerification, action: "verify" | "reject") {
     // A rejection un-applies the declared prior-employer income and TDS from this person's tax projection -
-    // it changes their withholding on the next run and notifies them - so it gets the same beat of friction
-    // as every other reject in the app. It is a `patch` rather than an `invoke`, which is the only reason it
-    // did not look like a decision to anything scanning for one (lib/confirmDecision.ts).
-    if (action === "reject" && !(await confirmDecision(confirm, "reject", `${v.employee_name}'s prior-employer tax declaration`))) return;
+    // it changes their withholding on the next run and notifies them - so it asks, and asks why, like every
+    // other reject in the app. It is a `patch` rather than an `invoke`, which is the only reason it did not
+    // look like a decision to anything scanning for one (lib/confirmDecision.ts).
+    let reason: string | null = null;
+    if (action === "reject") {
+      reason = await askRejectReason(askReason, `${v.employee_name}'s prior-employer tax declaration`);
+      if (reason === null) return;
+    }
     setBusy(v.employee + action);
     try {
       // The version the card was drawn from, and the figures that were on it. Either alone closes the gap the
@@ -71,7 +73,7 @@ function TaxVerificationsCard({ rows, money, canDecide, onDone }: { rows: TaxVer
         `employees/${idOf(v.employee)}/tax`,
         action === "verify"
           ? { values: { action, verified_income: v.prior_employer_income, verified_tds: v.prior_employer_tds } }
-          : { values: { action } },
+          : { values: { action, reason } },
         v.etag,
       );
       toast({ title: action === "verify" ? "Previous employer details verified" : "Declaration rejected", variant: "success" });
@@ -171,7 +173,7 @@ export default function Approvals({ me }: { me: Me }) {
     setDecided((prev) => new Set(prev).add(path));
     reload();
   };
-  const [rejecting, setRejecting] = useState<RejectTarget | null>(null);
+  const reject = useRejectRequest(settle);
 
   const emp = useMemo(() => {
     const m = new Map(employees.map((e) => [idOf(e.path), e] as const));
@@ -305,6 +307,7 @@ export default function Approvals({ me }: { me: Me }) {
   // fan out per collection and only the rows that succeeded disappear (failures stay selected for a retry).
   const { toast } = useToast();
   const confirmDialog = useConfirm();
+  const askReason = useAskReason();
   const [sel, setSel] = useState<Set<string>>(new Set());
   const [bulkBusy, setBulkBusy] = useState<null | "approve" | "reject">(null);
   const canDecideRow = (r: Approvable) => (r.access?.can ?? []).includes("approve") || (r.access?.can ?? []).includes("reject");
@@ -331,21 +334,25 @@ export default function Approvals({ me }: { me: Me }) {
     const items = merged.filter(({ r }) => sel.has(r.path) && (r.access?.can ?? []).includes(verb));
     if (items.length === 0) return;
     const n = items.length;
-    const ok = await confirmDialog({
-      title: verb === "approve" ? `Approve ${n} request${n === 1 ? "" : "s"}?` : `Reject ${n} request${n === 1 ? "" : "s"}?`,
-      description:
-        verb === "reject"
-          ? "Requesters are notified. A bulk reject carries no note - reject individually to explain why."
-          : "Each requester is notified of the decision.",
-      destructive: verb === "reject",
-      confirmLabel: verb === "approve" ? "Approve all" : "Reject all",
-    });
-    if (!ok) return;
+    // A rejection must say why, so a bulk reject asks for ONE reason that every requester in the batch is sent.
+    let body: { reason: string } | undefined;
+    if (verb === "reject") {
+      const reason = await askBulkRejectReason(askReason, n);
+      if (reason === null) return;
+      body = { reason };
+    } else {
+      const ok = await confirmDialog({
+        title: `Approve ${n} request${n === 1 ? "" : "s"}?`,
+        description: "Each requester is notified of the decision.",
+        confirmLabel: "Approve all",
+      });
+      if (!ok) return;
+    }
     setBulkBusy(verb);
     try {
       const byColl = new Map<string, Approvable[]>();
       for (const { g, r } of items) byColl.set(g.collection, [...(byColl.get(g.collection) ?? []), r]);
-      const parts = await Promise.all([...byColl].map(([coll, rows]) => bulkInvoke(coll, verb, rows)));
+      const parts = await Promise.all([...byColl].map(([coll, rows]) => bulkInvoke(coll, verb, rows, body)));
       const res = mergeBulkResults(parts);
       toast(bulkSummary(verb === "approve" ? "Approved" : "Rejected", res));
       // Hide the decided rows immediately (same optimistic path as a single decision), keep failures selected.
@@ -402,7 +409,7 @@ export default function Approvals({ me }: { me: Me }) {
         kind={withKind ? { label: g.label, icon: g.icon } : undefined}
         decidedState={decidedState}
         onApproved={settle}
-        onRejectClick={() => setRejecting({ collection: g.collection, row: r, name: who.name, summary })}
+        onRejectClick={() => reject({ collection: g.collection, row: r, name: who.name, summary })}
         checked={sel.has(r.path)}
         onCheckedChange={!isHistory && canDecideRow(r) ? () => toggleSel(r.path) : undefined}
       />
@@ -546,7 +553,6 @@ export default function Approvals({ me }: { me: Me }) {
           )}
         </>
       )}
-      <RejectDialog target={rejecting} onClose={() => setRejecting(null)} onRejected={settle} />
     </div>
   );
 }

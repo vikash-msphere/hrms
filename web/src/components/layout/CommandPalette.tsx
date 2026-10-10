@@ -1,14 +1,14 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { Search, ArrowLeft, User, Loader2, KeyRound, X, Sparkles, ListFilter, Lock, History, Check, Ban, CalendarDays, ChevronDown, Bookmark, BookmarkPlus, Pin, PinOff, WandSparkles } from "lucide-react";
-import { useConfirm } from "@/components/common/confirm";
+import { useAskReason, useConfirm } from "@/components/common/confirm";
 import { FilterChips, filterChipClass } from "@/components/common/FilterChips";
 import { ChipsSkeleton } from "@/components/common/Skeletons";
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useToast } from "@/components/ui/use-toast";
-import { confirmDecision } from "@/lib/confirmDecision";
+import { askDecision } from "@/lib/confirmDecision";
 import { useSelfApprovalAllowed } from "@/lib/approvals";
 import { hasPaletteActions, paletteVerbs, type ActionableRow, type PaletteVerb, type PaletteVerbOption } from "@/lib/paletteActions";
 import { previewOf } from "@/lib/searchPreview";
@@ -781,6 +781,7 @@ function usePaletteSearch({ me, open, close }: { me: Me; open: boolean; close: (
   // and state), so what is offered is what the server would allow.
   const [actions, setActions] = useState<ActionsState | null>(null);
   const confirm = useConfirm();
+  const askReason = useAskReason();
   const { toast } = useToast();
   const allowSelfApproval = useSelfApprovalAllowed();
   useEffect(() => setActions(null), [query, open]);
@@ -1343,13 +1344,14 @@ function usePaletteSearch({ me, open, close }: { me: Me; open: boolean; close: (
   };
 
   // A decision from the palette - from a record's actions (Tab), from the buttons on its row, or from the
-  // preview: asked first, exactly as the page asks (lib/confirmDecision.ts), then sent against the version that
-  // was read, so a request decided meanwhile by somebody else is refused, not repeated. The record and the
-  // results are read again afterwards, so what is shown is what the decision left.
+  // preview: asked first, exactly as the page asks (lib/confirmDecision.ts - a reject asks for its reason), then
+  // sent against the version that was read, so a request decided meanwhile by somebody else is refused, not
+  // repeated. The record and the results are read again afterwards, so what is shown is what the decision left.
   const decideOn = async (target: { name: string; label: string; etag?: string }, verb: PaletteVerb) => {
-    if (!(await confirmDecision(confirm, verb, target.label))) return;
+    const body = await askDecision({ confirm, askReason }, verb, target.label);
+    if (body === null) return;
     try {
-      await invoke(target.name, verb, target.etag);
+      await invoke(target.name, verb, target.etag, body);
       toast({ title: verb === "approve" ? "Approved" : "Rejected", description: target.label, variant: "success" });
       setActions(null);
       records.current.delete(target.name);

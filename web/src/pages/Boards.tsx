@@ -51,7 +51,8 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { PhotoAvatar } from "@/components/common/PhotoAvatar";
-import type { Label as BoardLabel } from "@/types";
+import type { Label as BoardLabel, TaskType } from "@/types";
+import { TaskTypeIcon, taskTypeOf, DEFAULT_TYPE_COLOR } from "@/lib/taskTypes";
 import { RichTextToolbar } from "@/components/common/RichTextToolbar";
 import { DraftButton } from "@/components/common/DraftButton";
 import { CardTriageCard } from "@/components/common/CardTriageCard";
@@ -259,25 +260,26 @@ const rankAt = (items: CardT[], idx: number) => {
 // With a `storageKey` the chip filters (not the search text) persist per board in localStorage, so a curated
 // view survives navigation. Initialized once per mount - the views are keyed by board, so switching boards
 // remounts and picks up that board's saved filter.
-type SavedFilter = { assignees?: string[]; priorities?: string[]; labels?: string[]; departments?: string[]; mine?: boolean; reported?: boolean };
+type SavedFilter = { assignees?: string[]; priorities?: string[]; types?: string[]; labels?: string[]; departments?: string[]; mine?: boolean; reported?: boolean };
 function useCardFilter(meId?: string | null, storageKey?: string) {
   const [saved] = useState((): SavedFilter => (storageKey ? readLocalJson<SavedFilter>(storageKey, {}) : {}));
   const [q, setQ] = useState("");
   const [assignees, setAssignees] = useState<Set<string>>(new Set(saved.assignees));
   const [priorities, setPriorities] = useState<Set<string>>(new Set(saved.priorities));
+  const [types, setTypes] = useState<Set<string>>(new Set(saved.types));
   const [labels, setLabels] = useState<Set<string>>(new Set(saved.labels));
   const [departments, setDepartments] = useState<Set<string>>(new Set(saved.departments));
   const [mine, setMine] = useState(!!saved.mine);
   // Tasks the caller FILED, which is a different question from the ones they are working on: "what did I ask
   // for, and where has it got to" had no answer on the board at all.
   const [reported, setReported] = useState(!!saved.reported);
-  const active = !!q || assignees.size > 0 || priorities.size > 0 || labels.size > 0 || departments.size > 0 || mine || reported;
-  const clear = () => { setQ(""); setAssignees(new Set()); setPriorities(new Set()); setLabels(new Set()); setDepartments(new Set()); setMine(false); setReported(false); };
+  const active = !!q || assignees.size > 0 || priorities.size > 0 || types.size > 0 || labels.size > 0 || departments.size > 0 || mine || reported;
+  const clear = () => { setQ(""); setAssignees(new Set()); setPriorities(new Set()); setTypes(new Set()); setLabels(new Set()); setDepartments(new Set()); setMine(false); setReported(false); };
   useEffect(() => {
     if (!storageKey) return;
-    const any = assignees.size || priorities.size || labels.size || departments.size || mine || reported;
-    writeLocalJson(storageKey, any ? ({ assignees: [...assignees], priorities: [...priorities], labels: [...labels], departments: [...departments], mine, reported } satisfies SavedFilter) : null);
-  }, [assignees, priorities, labels, departments, mine, reported, storageKey]);
+    const any = assignees.size || priorities.size || types.size || labels.size || departments.size || mine || reported;
+    writeLocalJson(storageKey, any ? ({ assignees: [...assignees], priorities: [...priorities], types: [...types], labels: [...labels], departments: [...departments], mine, reported } satisfies SavedFilter) : null);
+  }, [assignees, priorities, types, labels, departments, mine, reported, storageKey]);
   const effDept = (c: CardT) => (c.department ? idOf(c.department) : NONE);
   // STABLE IDENTITY, because every consumer memoizes on it. `match` used to be a fresh closure per render, so
   // the board's `visible` list, its per-cell card lists and BoardToolbar's own `useMemo(…, [cards, filter])`
@@ -291,16 +293,18 @@ function useCardFilter(meId?: string | null, storageKey?: string) {
       if (reported && (!c.reporter || idOf(c.reporter) !== meId)) return false;
       if (assignees.size && !assignees.has(c.assignee ? idOf(c.assignee) : NONE)) return false;
       if (priorities.size && !priorities.has(c.priority)) return false;
+      if (types.size && !types.has(c.task_type || NONE)) return false;
       if (labels.size && !(c.labels ?? []).some((k) => labels.has(k))) return false;
       if (departments.size && !departments.has(c.department ? idOf(c.department) : NONE)) return false;
       return true;
     },
-    [needle, mine, reported, assignees, priorities, labels, departments, meId],
+    [needle, mine, reported, assignees, priorities, types, labels, departments, meId],
   );
   return {
-    q, setQ, mine, setMine, reported, setReported, assignees, priorities, labels, departments, active, clear, match, effDept,
+    q, setQ, mine, setMine, reported, setReported, assignees, priorities, types, labels, departments, active, clear, match, effDept,
     toggleAssignee: (k: string) => setAssignees((s) => toggleSet(s, k)),
     togglePriority: (k: string) => setPriorities((s) => toggleSet(s, k)),
+    toggleType: (k: string) => setTypes((s) => toggleSet(s, k)),
     toggleLabel: (k: string) => setLabels((s) => toggleSet(s, k)),
     toggleDepartment: (k: string) => setDepartments((s) => toggleSet(s, k)),
   };
@@ -387,6 +391,16 @@ function BoardToolbar({ filter, board, cards, empName, empPhoto, deptName }: { f
           </Row>
         ))}
       </FilterPopover>
+      {(board.task_types?.length ?? 0) > 0 && (
+        <FilterPopover label="Type" count={filter.types.size}>
+          {board.task_types!.map((t) => (
+            <Row key={t.key} on={filter.types.has(t.key)} onClick={() => filter.toggleType(t.key)}>
+              <TaskTypeIcon type={t} /> <span className="truncate">{t.label}</span>
+            </Row>
+          ))}
+          <Row on={filter.types.has(NONE)} onClick={() => filter.toggleType(NONE)}>No type</Row>
+        </FilterPopover>
+      )}
       {board.labels.length > 0 && (
         <FilterPopover label="Labels" count={filter.labels.size}>
           {board.labels.map((l) => (
@@ -784,15 +798,19 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
       case "assignee": return c.assignee ? idOf(c.assignee) : NONE;
       case "goal": return c.goal ? idOf(c.goal) : NONE;
       case "priority": return c.priority || NONE;
+      // Resolved against the catalog: a type the board has since dropped has no lane, so it reads as untyped.
+      case "task_type": return taskTypeOf(board.task_types, c.task_type)?.key ?? NONE;
       case "department": return c.department ? idOf(c.department) : NONE;
       case "custom": return c.swimlane_key || NONE;
       default: return "";
     }
-  }, [board.swimlane_mode]);
-  const noneLabel = board.swimlane_mode === "assignee" ? "Unassigned" : board.swimlane_mode === "goal" ? "No goal" : board.swimlane_mode === "department" ? "No department" : board.swimlane_mode === "custom" ? (board.no_lane_label || "Ungrouped") : "None";
+  }, [board.swimlane_mode, board.task_types]);
+  const noneLabel = board.swimlane_mode === "assignee" ? "Unassigned" : board.swimlane_mode === "goal" ? "No goal" : board.swimlane_mode === "department" ? "No department" : board.swimlane_mode === "task_type" ? "No type" : board.swimlane_mode === "custom" ? (board.no_lane_label || "Ungrouped") : "None";
   const lanes = useMemo((): { key: string; label: string }[] => {
     if (board.swimlane_mode === "none") return [{ key: "", label: "" }];
     if (board.swimlane_mode === "custom") return [...board.swimlanes, { key: NONE, label: noneLabel }];
+    // task type: the catalog's order, then the untyped catch-all.
+    if (board.swimlane_mode === "task_type") return [...(board.task_types ?? []).map((t) => ({ key: t.key, label: t.label })), { key: NONE, label: noneLabel }];
     // priority: fixed lane set in severity order (a card always has a priority, so no catch-all).
     if (board.swimlane_mode === "priority") return PRIORITY_LANES;
     // assignee / goal / department: lanes present among the cards, plus a catch-all.
@@ -883,6 +901,7 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
       else if (board.swimlane_mode === "assignee") { move.to_assignee = laneVal ? `employees/${laneVal}` : null; patch.assignee = laneVal ? `employees/${laneVal}` : undefined; }
       else if (board.swimlane_mode === "goal") { move.to_goal = laneVal ? `goals/${laneVal}` : null; patch.goal = laneVal ? `goals/${laneVal}` : undefined; }
       else if (board.swimlane_mode === "priority" && laneVal) { move.to_priority = laneVal; patch.priority = laneVal as CardT["priority"]; }
+      else if (board.swimlane_mode === "task_type") { move.to_task_type = laneVal; patch.task_type = laneVal ?? undefined; }
       else if (board.swimlane_mode === "department") { move.to_department = laneVal ? `departments/${laneVal}` : null; patch.department = laneVal ? `departments/${laneVal}` : undefined; }
     }
     // Optimistic move, then the row the server actually wrote.
@@ -926,6 +945,8 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
       onMove={(k) => void menuMove(c, k)}
       onAssignMe={() => void menuPatch(c, { assignee: `employees/${me.employee_id}` })}
       onPriority={(p) => void menuPatch(c, { priority: p })}
+      types={board.task_types}
+      onType={(t) => void menuPatch(c, { task_type: t ?? "" })}
     />
   );
 
@@ -1048,7 +1069,7 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
                           }}
                         >
                           <span className={`pointer-events-none absolute inset-x-1 -top-1 z-10 h-0.5 rounded bg-primary ${lineAt === `${c.path}:t` ? "" : "hidden"}`} />
-                          <CardTile card={c} assignee={assigneeOf(c)} catalog={board.labels} goalName={c.goal ? goalTitle(c.goal) : undefined} blockerKey={blockerKeyOf(c)} deptLabel={c.department ? deptName(c.department) : undefined} menu={tileMenu(c)} onDragStart={() => { dragId.current = idOf(c.path); }} onClick={() => openCard(c)} />
+                          <CardTile card={c} assignee={assigneeOf(c)} catalog={board.labels} types={board.task_types} typeDisplay={board.task_type_display} goalName={c.goal ? goalTitle(c.goal) : undefined} blockerKey={blockerKeyOf(c)} deptLabel={c.department ? deptName(c.department) : undefined} menu={tileMenu(c)} onDragStart={() => { dragId.current = idOf(c.path); }} onClick={() => openCard(c)} />
                           <span className={`pointer-events-none absolute inset-x-1 -bottom-1 z-10 h-0.5 rounded bg-primary ${lineAt === `${c.path}:b` ? "" : "hidden"}`} />
                         </div>
                       ))}
@@ -1077,7 +1098,7 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
 
 const STALE_AFTER_DAYS = 7; // aging signal: card untouched this long (and not delivered) gets a quiet dot
 
-function CardTile({ card, assignee, catalog, goalName, blockerKey, deptLabel, menu, onDragStart, onClick }: { card: CardT; assignee: { id: string; name: string; photo?: string } | null; catalog: BoardLabel[]; goalName?: string; blockerKey?: string; deptLabel?: string; menu?: ReactNode; onDragStart: () => void; onClick: () => void }) {
+function CardTile({ card, assignee, catalog, types, typeDisplay = "icon", goalName, blockerKey, deptLabel, menu, onDragStart, onClick }: { card: CardT; assignee: { id: string; name: string; photo?: string } | null; catalog: BoardLabel[]; types?: TaskType[]; typeDisplay?: Board["task_type_display"]; goalName?: string; blockerKey?: string; deptLabel?: string; menu?: ReactNode; onDragStart: () => void; onClick: () => void }) {
   // Due chip: red when overdue, amber when due within 3 days, quiet otherwise. Hidden once delivered.
   //
   // DAYS, NOT INSTANTS. `due_date` is a date-only value, so `new Date(due_date)` is that day at UTC midnight,
@@ -1092,6 +1113,7 @@ function CardTile({ card, assignee, catalog, goalName, blockerKey, deptLabel, me
   const dueSoon = !!dueYmd && !overdue && daysBetweenYmd(todayStr(), dueYmd) <= 3;
   const ageDays = card.update_time ? Math.floor((Date.now() - new Date(card.update_time).getTime()) / 86400e3) : 0;
   const stale = ageDays >= STALE_AFTER_DAYS && !card.deliver_time;
+  const type = taskTypeOf(types, card.task_type);
   return (
     // Opening a card is the board's primary action and was pointer-only: the tile was a plain draggable div,
     // so a keyboard could not reach a single card on the board. `role="button"` + a tab stop + Enter/Space
@@ -1123,6 +1145,16 @@ function CardTile({ card, assignee, catalog, goalName, blockerKey, deptLabel, me
         {card.labels?.length ? <div className="task-tile-labels mb-1.5 flex flex-wrap gap-1"><LabelChips keys={card.labels} catalog={catalog} max={3} /></div> : null}
         <p className="task-tile-title text-sm font-medium leading-snug">{card.title}</p>
         <div className="task-tile-meta mt-2 flex items-center gap-1.5">
+          {/* The type leads the key, the way a tracker reads: "bug ENG-14". The board says whether that is the
+              glyph, the name, or both; the glyph alone names itself in a tooltip. */}
+          {type && (typeDisplay === "icon"
+            ? <Tooltip><TooltipTrigger asChild><span className="inline-flex"><TaskTypeIcon type={type} /></span></TooltipTrigger><TooltipContent>{type.label}</TooltipContent></Tooltip>
+            : (
+              <span className="inline-flex min-w-0 items-center gap-1 rounded px-1.5 text-[10px] font-medium" style={{ backgroundColor: `${type.color ?? DEFAULT_TYPE_COLOR}22`, color: type.color ?? DEFAULT_TYPE_COLOR }}>
+                {typeDisplay === "both" && <TaskTypeIcon type={type} className="h-3 w-3" />}
+                <span className="truncate">{type.label}</span>
+              </span>
+            ))}
           <span className="font-mono text-[10px] text-muted-foreground">{taskKey(card)}</span>
           {stale && <Tooltip><TooltipTrigger asChild><span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warning" /></TooltipTrigger><TooltipContent>No activity for {ageDays} days</TooltipContent></Tooltip>}
           <Tooltip><TooltipTrigger asChild><span><PriorityIcon p={card.priority} /></span></TooltipTrigger><TooltipContent className="capitalize">{card.priority} priority</TooltipContent></Tooltip>
@@ -1172,7 +1204,7 @@ function CardTile({ card, assignee, catalog, goalName, blockerKey, deptLabel, me
 // "..." on every tile: the no-drag path for the common one-off actions (and the ONLY move path on touch, where
 // HTML5 drag-and-drop does not fire). Entries are gated on the card's `access.can`; with nothing allowed the
 // button doesn't render at all. Hidden until hover on fine pointers, always visible on coarse ones.
-function CardActionsMenu({ card, meId, columns, sprintExtras, onMove, onAssignMe, onPriority }: {
+function CardActionsMenu({ card, meId, columns, sprintExtras, onMove, onAssignMe, onPriority, types, onType }: {
   card: CardT;
   meId?: string | null;
   columns: BoardColumn[];
@@ -1180,6 +1212,8 @@ function CardActionsMenu({ card, meId, columns, sprintExtras, onMove, onAssignMe
   onMove: (colKey: string) => void;
   onAssignMe: () => void;
   onPriority: (p: CardT["priority"]) => void;
+  types?: TaskType[]; // the board's task-type catalog; no submenu when it is empty
+  onType: (key: string | null) => void;
 }) {
   const can = card.access?.can ?? [];
   const canMove = can.includes("move");
@@ -1222,6 +1256,19 @@ function CardActionsMenu({ card, meId, columns, sprintExtras, onMove, onAssignMe
                   <PriorityIcon p={p} /> {p}
                 </DropdownMenuItem>
               ))}
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+        )}
+        {canEdit && (types?.length ?? 0) > 0 && (
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger>Type</DropdownMenuSubTrigger>
+            <DropdownMenuSubContent>
+              {types!.map((t) => (
+                <DropdownMenuItem key={t.key} disabled={t.key === card.task_type} onClick={() => onType(t.key)} className="gap-2">
+                  <TaskTypeIcon type={t} /> {t.label}
+                </DropdownMenuItem>
+              ))}
+              {!!taskTypeOf(types, card.task_type) && <><DropdownMenuSeparator /><DropdownMenuItem onClick={() => onType(null)}>No type</DropdownMenuItem></>}
             </DropdownMenuSubContent>
           </DropdownMenuSub>
         )}
@@ -1311,6 +1358,8 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
   const [title, setTitle] = useState(card?.title ?? "");
   const [description, setDescription] = useState(card?.description ?? "");
   const [priority, setPriority] = useState<CardT["priority"]>(card?.priority ?? "medium");
+  // "" = no type. Resolved against the catalog, so a type the board has since dropped opens as none.
+  const [taskType, setTaskType] = useState(taskTypeOf(board.task_types, card?.task_type)?.key ?? "");
   const [assignee, setAssignee] = useState(card?.assignee ? idOf(card.assignee) : "");
   // New card: "" -> defer to the org default. Existing card: its dept, or NO_DEPT if it explicitly has none.
   const [department, setDepartment] = useState(card ? (card.department ? idOf(card.department) : NO_DEPT) : "");
@@ -1383,15 +1432,15 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
   // draft stashes. Deliberately excludes the checklist, comments, status and block state - those are verbs that
   // already took effect, so counting them as unsaved edits would prompt to "discard" work that is on the server.
   const form = useMemo(
-    () => ({ title, description, priority, assignee, department, goal, swimlane, size, due, labels, docs, initialTodos }),
-    [title, description, priority, assignee, department, goal, swimlane, size, due, labels, docs, initialTodos],
+    () => ({ title, description, priority, taskType, assignee, department, goal, swimlane, size, due, labels, docs, initialTodos }),
+    [title, description, priority, taskType, assignee, department, goal, swimlane, size, due, labels, docs, initialTodos],
   );
   function applyForm(f: typeof form) {
-    setTitle(f.title); setDescription(f.description); setPriority(f.priority); setAssignee(f.assignee);
+    setTitle(f.title); setDescription(f.description); setPriority(f.priority); setTaskType(f.taskType ?? ""); setAssignee(f.assignee);
     setDepartment(f.department); setGoal(f.goal); setSwimlane(f.swimlane); setSize(f.size); setDue(f.due);
     setLabels(f.labels ?? []); setDocs(f.docs ?? []); setInitialTodos(f.initialTodos ?? []);
   }
-  const blank = { title: "", description: "", priority: "medium" as CardT["priority"], assignee: "", department: "", goal: "", swimlane: "", size: "", due: "", labels: [], docs: [], initialTodos: [] };
+  const blank = { title: "", description: "", priority: "medium" as CardT["priority"], taskType: "", assignee: "", department: "", goal: "", swimlane: "", size: "", due: "", labels: [], docs: [], initialTodos: [] };
 
   // Unsaved field edits, against the values this dialog opened with. Only used to gate walking to the next
   // task: the dialog is remounted per card, so a step sideways would take the edits with it.
@@ -1445,6 +1494,7 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
       ["the status", conflict.column_key, card.column_key],
       ["the assignee", conflict.assignee ?? "", card.assignee ?? ""],
       ["the priority", conflict.priority, card.priority],
+      ["the type", conflict.task_type ?? "", card.task_type ?? ""],
       ["the due date", conflict.due_date ?? "", card.due_date ?? ""],
       ["the points", conflict.size ?? "", card.size ?? ""],
       ["the labels", (conflict.labels ?? []).join(","), (card.labels ?? []).join(",")],
@@ -1583,6 +1633,7 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
       title: title.trim(),
       description: description.trim(),
       priority,
+      task_type: taskType,
       assignee: assignee ? `employees/${assignee}` : "",
       goal: goal ? `goals/${goal}` : "",
       labels,
@@ -1790,6 +1841,14 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
                 <button type="button" className={cn(fact, "capitalize")} onClick={() => setTab("details")}>
                   <PriorityIcon p={priority} /> {priority}
                 </button>
+                {(() => {
+                  const t = taskTypeOf(board.task_types, taskType);
+                  return t && (
+                    <button type="button" className={fact} onClick={() => setTab("details")}>
+                      <TaskTypeIcon type={t} /> {t.label}
+                    </button>
+                  );
+                })()}
                 <button type="button" className={fact} onClick={() => setTab("details")}>
                   {who
                     ? <><PhotoAvatar employeeId={assignee} name={`${who.first_name} ${who.last_name}`} photo={who.photo} className="h-4 w-4 text-[8px]" /> {who.first_name} {who.last_name}</>
@@ -1935,6 +1994,19 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
           )}
           {/* Every field below is disabled for a reader without `update`: Title, Due and Points already were,
               so the rest looked editable right up to a Save they could never press. */}
+          {(board.task_types?.length ?? 0) > 0 && (
+            <Field label="Type">
+              <Select value={taskType || NONE} onValueChange={(v) => setTaskType(v === NONE ? "" : v)} disabled={!canEdit}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {board.task_types!.map((t) => (
+                    <SelectItem key={t.key} value={t.key}><span className="flex items-center gap-2"><TaskTypeIcon type={t} /> {t.label}</span></SelectItem>
+                  ))}
+                  <SelectItem value={NONE}><span className="text-muted-foreground">No type</span></SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
+          )}
           <Field label="Assignee">
             <div className="flex items-center gap-1.5">
               <div className="min-w-0 flex-1"><Combobox value={assignee} onValueChange={setAssignee} options={empOptions} placeholder="Unassigned" disabled={!canEdit} /></div>
@@ -2406,7 +2478,7 @@ function NewBoardDialog({ me, existing, onClose, onSaved }: { me: Me; existing: 
       ...(form.prefix.trim() ? { task_prefix: prefix } : {}),
       // Structure only. Cards, sprints and who the board is shared with are deliberately not copied: the first
       // is somebody else's work, and the last would hand a new team an access list nobody asked for.
-      ...(source ? { columns: source.columns, labels: source.labels, swimlane_mode: source.swimlane_mode, swimlanes: source.swimlanes } : {}),
+      ...(source ? { columns: source.columns, labels: source.labels, task_types: source.task_types ?? [], task_type_display: source.task_type_display, swimlane_mode: source.swimlane_mode, swimlanes: source.swimlanes } : {}),
     });
     toast({ title: "Board created", variant: "success" });
     onSaved(idOf(b.path));
@@ -2702,6 +2774,7 @@ function BoardListTab({ board, me }: { board: Board; me: Me }) {
     // not one the table needs to be wider for by default.
     { id: "reporter", header: "Reporter", accessor: (c) => (c.reporter ? empName(c.reporter) : ""), filter: "select", groupBy: true, defaultHidden: true },
     { id: "priority", header: "Priority", accessor: (c) => c.priority, filter: "select", groupBy: true, cell: (c) => <span className="flex items-center gap-1 capitalize"><PriorityIcon p={c.priority} /> {c.priority}</span> },
+    { id: "type", header: "Type", accessor: (c) => taskTypeOf(board.task_types, c.task_type)?.label ?? "", filter: "select", groupBy: true, cell: (c) => { const t = taskTypeOf(board.task_types, c.task_type); return t ? <span className="flex items-center gap-1"><TaskTypeIcon type={t} /> {t.label}</span> : null; } },
     // Points total under the column, and per fold when the list is grouped: the sprint arithmetic nobody
     // should be doing in their head.
     { id: "points", header: "Points", accessor: (c) => c.size ?? null, align: "right", filter: "number", aggregate: "sum" },
@@ -2745,7 +2818,7 @@ function BoardListTab({ board, me }: { board: Board; me: Me }) {
         return Number.isFinite(days) && days >= 0 ? days : null;
       },
     },
-  ], [colLabel, empName, board.labels, me.employee_id]);
+  ], [colLabel, empName, board.labels, board.task_types, me.employee_id]);
 
   // What a backlog is asked about when it stops being a wall of cards: what has gone past its date, what
   // nobody owns, and what is stuck behind something else.
@@ -3044,6 +3117,8 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
         }}
         onAssignMe={() => void menuPatch(c, { assignee: `employees/${me.employee_id}` })}
         onPriority={(p) => void menuPatch(c, { priority: p })}
+        types={board.task_types}
+        onType={(t) => void menuPatch(c, { task_type: t ?? "" })}
         sprintExtras={
           inBacklog
             ? (sprint && sprint.state !== "completed" ? (
@@ -3172,7 +3247,7 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
                   }}
                 >
                   <span className={`pointer-events-none absolute inset-x-1 -top-1 z-10 h-0.5 rounded bg-primary ${lineAt === `${c.path}:t` ? "" : "hidden"}`} />
-                  <CardTile card={c} assignee={assigneeOf(c)} catalog={board.labels} goalName={c.goal ? goalTitle(c.goal) : undefined} blockerKey={blockerKeyOf(c)} deptLabel={c.department ? deptName(c.department) : undefined} menu={tileMenu(c)} onDragStart={() => { dragId.current = idOf(c.path); }} onClick={() => openCard(c)} />
+                  <CardTile card={c} assignee={assigneeOf(c)} catalog={board.labels} types={board.task_types} typeDisplay={board.task_type_display} goalName={c.goal ? goalTitle(c.goal) : undefined} blockerKey={blockerKeyOf(c)} deptLabel={c.department ? deptName(c.department) : undefined} menu={tileMenu(c)} onDragStart={() => { dragId.current = idOf(c.path); }} onClick={() => openCard(c)} />
                   <span className={`pointer-events-none absolute inset-x-1 -bottom-1 z-10 h-0.5 rounded bg-primary ${lineAt === `${c.path}:b` ? "" : "hidden"}`} />
                 </div>
               ));
@@ -3220,7 +3295,7 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
                   onDrop={(e) => { e.preventDefault(); void dropOnColumn(col.key); }}
                 >
                   {items.map((c) => (
-                    <CardTile key={c.path} card={c} assignee={assigneeOf(c)} catalog={board.labels} goalName={c.goal ? goalTitle(c.goal) : undefined} blockerKey={blockerKeyOf(c)} deptLabel={c.department ? deptName(c.department) : undefined} menu={tileMenu(c)} onDragStart={() => { dragId.current = idOf(c.path); }} onClick={() => openCard(c)} />
+                    <CardTile key={c.path} card={c} assignee={assigneeOf(c)} catalog={board.labels} types={board.task_types} typeDisplay={board.task_type_display} goalName={c.goal ? goalTitle(c.goal) : undefined} blockerKey={blockerKeyOf(c)} deptLabel={c.department ? deptName(c.department) : undefined} menu={tileMenu(c)} onDragStart={() => { dragId.current = idOf(c.path); }} onClick={() => openCard(c)} />
                   ))}
                 </div>
               </div>

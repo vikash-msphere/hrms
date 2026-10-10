@@ -2,10 +2,9 @@ import { SPA_HEADERS, gotoRoute, purge, test, expect, toast } from "./fixtures";
 
 // The dashboard's OWN inline decision widget - a third surface for the same approve/reject verbs, distinct
 // from both the full Approvals inbox (`rejection.spec.ts`, `approval.spec.ts`) and any collection's own page.
-// "Awaiting your approval" lets the decider act right there among the widgets, with its own confirm-and-note
-// dialog (`decideInline` in Dashboard.tsx) - built to answer exactly like the inbox row, but never proven to
-// actually work rather than just render. Loans/advances take no note (`REJECT_NOTE` excludes them), so this
-// also exercises the plain half of that dialog `rejection.spec.ts`'s note-taking collections don't.
+// "Awaiting your approval" lets the decider act right there among the widgets (`decideInline` in
+// Dashboard.tsx), asking for the reason the same way the inbox row does - built to answer exactly like it,
+// and proven here to actually work rather than just render.
 //
 // Payroll, not the employee's manager: loans/advances are payroll's workflow by design (grants.ts - manager
 // holds `loans.**` at `read` only, "decisions are payroll's verbs"), so a manager never gets an `approve` on
@@ -52,10 +51,10 @@ test("a request is rejected right from the dashboard's own approval widget", asy
 
     await row.getByRole("button", { name: /^Reject/ }).click();
     const dialog = payroll.getByRole("dialog");
-    await expect(dialog.getByText(/Reject this advance\?/)).toBeVisible({ timeout: 30_000 });
-    // Loans carry no note (not in REJECT_NOTE) - no textarea offered, unlike overtime/remote-work/expenses/
-    // asset-requests.
-    await expect(dialog.getByRole("textbox")).toHaveCount(0);
+    await expect(dialog.getByText("Reject this request?")).toBeVisible({ timeout: 30_000 });
+    await expect(dialog.getByText(/advance request/)).toBeVisible();
+    await expect(dialog.getByRole("button", { name: "Reject", exact: true })).toBeDisabled();
+    await dialog.getByRole("textbox", { name: "Reason", exact: true }).fill("Already advanced this month");
     await dialog.getByRole("button", { name: "Reject", exact: true }).click();
     await expect(toast(payroll, "Rejected")).toBeVisible({ timeout: 30_000 });
 
@@ -64,9 +63,11 @@ test("a request is rejected right from the dashboard's own approval widget", asy
     await expect
       .poll(async () => {
         const r = await payroll.request.get(`/v1/${path}`);
-        return r.ok() ? ((await r.json()) as { status?: string }).status : "unreadable";
+        if (!r.ok()) return "unreadable";
+        const body = (await r.json()) as { status?: string; decision_note?: string };
+        return `${body.status}: ${body.decision_note}`;
       }, { timeout: 30_000 })
-      .toBe("REJECTED");
+      .toBe("REJECTED: Already advanced this month");
   } finally {
     await purge(payroll, path);
   }

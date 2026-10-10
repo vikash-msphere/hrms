@@ -11,10 +11,10 @@ import { notify, notifyManager } from "./notifications";
 import { emitEvent } from "./eventBus";
 import { invalidArgument, notFound, failedPrecondition } from "../lib/errors";
 import { keysetPage } from "./keysetPage";
-import { assertNotSubject, assertReviewedVersion } from "./decisionGuard";
+import { assertNotSubject, assertReviewedVersion, requireRejectReason } from "./decisionGuard";
 
 // Overtime requests: an employee logs extra hours for a day; a manager (own dept) or HR approves/rejects, the
-// owner cancels while pending. Mirrors attendance-regularizations (request -> decide), without a side effect
+// owner cancels while pending or approved-and-unpaid. Mirrors attendance-regularizations (request -> decide), without a side effect
 // on approval - the approved record IS the tracked overtime. Who may approve/reject/cancel is the verb's grant
 // (middleware); the service guards state transitions and maker-checker (services/decisionGuard.ts).
 export type OvertimeInput = {
@@ -69,28 +69,38 @@ export async function createOvertimeRequest(deps: Deps, actor: AppUser, input: O
 
 async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "REJECTED" | "CANCELLED", note?: string | null, ifMatch?: string) {
   const row = await getOvertimeRequest(deps, actor, id);
-  if (row.state !== "PENDING") throw failedPrecondition(to === "CANCELLED" ? "only pending requests can be cancelled" : "request is not pending");
+  const stuck = to === "CANCELLED" ? "only pending or unpaid approved requests can be cancelled" : "request is not pending";
+  // Cancel also takes back APPROVED overtime the person no longer claims, until a payroll run (or an exit
+  // settlement) picks it up - past that it is on a payslip, and the run is where it gets corrected.
+  const paid = row.paidRunId != null || row.paidAt != null;
+  if (to === "CANCELLED" && row.state === "APPROVED") {
+    if (paid) throw failedPrecondition("this overtime is already in a payroll run, so it cannot be cancelled");
+  } else if (row.state !== "PENDING") {
+    throw failedPrecondition(stuck);
+  }
   assertReviewedVersion(row, ifMatch);
   // Approved overtime is paid by the next run, so the person it pays may not be the one approving it.
   if (to === "APPROVED") await assertNotSubject(deps, actor, row.employeeId, "approve", "overtime request");
-  // Guard the flip on PENDING so the decision is EXACTLY-ONCE: a double-clicked/concurrent call that also
-  // read PENDING loses here (0 rows) instead of both firing the notify/event side-effects twice.
+  // Guard the flip on the state just validated so the decision is EXACTLY-ONCE: a double-clicked/concurrent
+  // call that also read it loses here (0 rows) instead of both firing the notify/event side-effects twice. An
+  // approved row is also guarded on still being unpaid, so a run that claimed it in between wins.
+  const from = row.state;
   const [updated] = await deps.db
     .update(schema.overtimeRequests)
     .set({ state: to, decidedBy: actor.uuid, decisionNote: note ?? null, updatedAt: new Date() })
-    .where(and(eq(schema.overtimeRequests.uuid, id), eq(schema.overtimeRequests.state, "PENDING")))
+    .where(and(eq(schema.overtimeRequests.uuid, id), eq(schema.overtimeRequests.state, from), isNull(schema.overtimeRequests.paidRunId), isNull(schema.overtimeRequests.paidAt)))
     .returning();
-  if (!updated) throw failedPrecondition(to === "CANCELLED" ? "only pending requests can be cancelled" : "request is not pending");
-  await audit(deps, actor, `overtime_request.${to.toLowerCase()}`, "overtime-requests", id, stateMeta(row.state, to, { employee: `employees/${row.employeeId}`, ...(note ? { reason: note } : {}) }), updated);
+  if (!updated) throw failedPrecondition(stuck);
+  await audit(deps, actor, `overtime_request.${to.toLowerCase()}`, "overtime-requests", id, stateMeta(from, to, { employee: `employees/${row.employeeId}`, ...(note ? { reason: note } : {}) }), updated);
   if (to === "APPROVED" || to === "REJECTED") {
-    await notify(deps, { recipient: row.employeeId, type: `overtime.${to.toLowerCase()}`, title: `Overtime ${to.toLowerCase()}`, body: `Your overtime request was ${to.toLowerCase()}.`, link: "overtime/history", subject: `overtime-requests/${id}`, actorId: actor.employeeId });
+    await notify(deps, { recipient: row.employeeId, type: `overtime.${to.toLowerCase()}`, title: `Overtime ${to.toLowerCase()}`, body: to === "REJECTED" ? `Your overtime request was rejected: ${note}` : `Your overtime request was ${to.toLowerCase()}.`, link: "overtime/history", subject: `overtime-requests/${id}`, actorId: actor.employeeId });
   }
   if (to === "APPROVED") await emitEvent(deps, actor, "overtime.approved", { subject: `overtime-requests/${id}`, employeeId: row.employeeId, payload: { hours: (+new Date(row.endTime) - +new Date(row.startTime)) / 3_600_000 } });
   return updated;
 }
 
 export const approveOvertimeRequest = (deps: Deps, actor: AppUser, id: string, note?: string | null, ifMatch?: string) => decide(deps, actor, id, "APPROVED", note, ifMatch);
-export const rejectOvertimeRequest = (deps: Deps, actor: AppUser, id: string, note?: string | null, ifMatch?: string) => decide(deps, actor, id, "REJECTED", note, ifMatch);
+export const rejectOvertimeRequest = async (deps: Deps, actor: AppUser, id: string, reason: string, ifMatch?: string) => decide(deps, actor, id, "REJECTED", requireRejectReason(reason), ifMatch);
 export const cancelOvertimeRequest = (deps: Deps, actor: AppUser, id: string) => decide(deps, actor, id, "CANCELLED");
 
 // Approved overtime not yet paid by any run, optionally only up to a period-end (so future-dated OT isn't

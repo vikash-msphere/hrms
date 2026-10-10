@@ -10,6 +10,7 @@ import {
   type LateEarlyInput,
 } from "../services/lateEarlyRequests";
 import { toLateEarlyRequestResource } from "../http/serialize";
+import { rejectBody, type RejectBody } from "../http/rejectBody";
 
 const createSchema = z
   .object({
@@ -21,7 +22,8 @@ const createSchema = z
   })
   .strict();
 
-// The decider's optional note, relayed to the requester with the decision.
+// The approver's optional note, relayed to the requester with the approval. A rejection's reason is required
+// (http/rejectBody.ts).
 const noteOf = async (c: Context<AppEnv>) => (await jsonBody<{ note?: string }>(c)).note;
 
 // Late arrival / early departure requests. The create runs the org's policy (it may refuse, flag the request as
@@ -51,7 +53,7 @@ export const lateEarlyRequests = collectionRoutes<LateEarlyInput, typeof schema.
   },
   verbs: {
     approve: { run: async (deps, user, id, _body, c) => approveLateEarlyRequest(deps, user, id, await noteOf(c), c.req.header("If-Match")) },
-    reject: { run: async (deps, user, id, _body, c) => rejectLateEarlyRequest(deps, user, id, await noteOf(c), c.req.header("If-Match")) },
+    reject: { schema: rejectBody, run: (deps, user, id, body: RejectBody, c) => rejectLateEarlyRequest(deps, user, id, body.reason, c.req.header("If-Match")) },
     cancel: { run: (deps, user, id) => cancelLateEarlyRequest(deps, user, id) },
   },
 });

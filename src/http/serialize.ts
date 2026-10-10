@@ -657,6 +657,8 @@ export function toBoardResource(r: any): Wire<"board"> {
     swimlane_mode: r.swimlaneMode,
     swimlanes: parse(r.swimlanesJson),
     labels: parse(r.labelsJson),
+    task_types: parse(r.taskTypesJson),
+    task_type_display: r.taskTypeDisplay ?? "icon",
     hide_empty_lanes: !!r.hideEmptyLanes,
     reassign_lane_on_move: !!r.reassignLaneOnMove,
     no_lane_label: r.noLaneLabel ?? undefined,
@@ -684,6 +686,7 @@ export function toCardResource(r: any): Wire<"card"> {
     title: r.title,
     description: r.description ?? undefined,
     priority: r.priority,
+    task_type: r.taskType ?? undefined,
     labels: jsonOr<string[]>(r.labelsJson, []),
     documents: jsonOr<string[]>(r.documentsJson, []).map((id) => ref("org-documents", id)).filter((x): x is string => !!x),
     size: r.size ?? undefined,
@@ -1084,6 +1087,7 @@ export function toTimeEntryResource(r: any): Wire<"time-entry"> {
     description: r.description ?? undefined,
     billable: !!r.billable,
     status: r.status,
+    decision_note: r.decisionNote ?? undefined,
   };
 }
 
@@ -1102,6 +1106,7 @@ export function toLoanResource(r: any): Wire<"loan"> {
     reason: r.reason ?? undefined,
     start_date: r.startDate ? iso(r.startDate).slice(0, 10) : undefined,
     status: r.status,
+    decision_note: r.decisionNote ?? undefined,
   };
 }
 
@@ -1116,6 +1121,7 @@ export function toTaxDeclarationResource(r: any): Wire<"tax-declaration"> {
     verified_amount: r.verifiedAmount ?? undefined,
     status: r.status,
     note: r.note ?? undefined,
+    decision_note: r.decisionNote ?? undefined,
     has_proof: !!r.hasProof, // set by the route when an attachment exists
   };
 }
@@ -1133,6 +1139,7 @@ export function toLeaveRequestResource(r: any): Wire<"leave-request"> {
     state: r.state,
     source: r.source ?? "app",
     reason: r.reason ?? undefined,
+    decision_note: r.decisionNote ?? undefined,
     has_document: !!r.hasDocument, // set by the route when a supporting file is attached to this request
     // Policy rules the org waives rather than enforces, recorded when this was filed. The approver sees them
     // on the decision card - a waiver nobody is shown is a rule that quietly does nothing.
@@ -1377,6 +1384,7 @@ export function toAttendanceRegularizationResource(r: any): Wire<"attendance-reg
     reason: r.reason ?? undefined,
     state: r.state,
     decided_by: ref("users", r.decidedBy),
+    decision_note: r.decisionNote ?? undefined,
   };
 }
 
@@ -1403,7 +1411,7 @@ export function toOvertimeRequestResource(r: any): Wire<"overtime-request"> {
     state: r.state,
     decided_by: ref("users", r.decidedBy),
     decision_note: r.decisionNote ?? undefined,
-    paid: !!r.paidRunId, // whether a payroll run has paid this overtime
+    paid: !!r.paidRunId || !!r.paidAt, // whether a payroll run (or an exit settlement, with no run) has paid this overtime
     paid_run: r.paidRunId ? ref("payroll-runs", r.paidRunId) : undefined,
   };
 }
@@ -1605,6 +1613,7 @@ export function toReimbursementResource(r: any): Wire<"reimbursement"> {
     incurred_on: r.incurredOn ? iso(r.incurredOn).slice(0, 10) : undefined,
     description: r.description ?? undefined,
     state: r.state,
+    decision_note: r.decisionNote ?? undefined,
     has_receipt: !!r.hasReceipt, // set by the route when an attachment exists for this claim
     advance: ref("loans", r.advanceId),
     // How much of the claim went against that advance rather than being paid out. Emitted only when there was
@@ -1675,6 +1684,9 @@ export function toExpenseResource(r: any): Wire<"expense"> {
     state: r.state,
     reimbursable: !!r.reimbursable,
     reimbursement: ref("reimbursements", r.reimbursementId),
+    // On an approved expense: whether its money has already moved (the payroll payout was paid, or a company
+    // card charge is matched to it), which is what keeps it from being cancelled. Set by the route.
+    settled: r.state === "APPROVED" ? !!r.settled : undefined,
     // Who gave the FIRST of two approvals on a large claim, so the queue can say the row is half-approved and
     // by whom. Absent on everything that needs only one.
     // Why this claim is worth a second look, for the approver deciding it. Present only on a claim awaiting a
@@ -1976,6 +1988,7 @@ export function toLeaveEncashmentResource(r: any): Wire<"leave-encashment"> {
     amount: r.amount,
     currency_code: r.currency,
     state: r.state,
+    decision_note: r.decisionNote ?? undefined,
     paid_run: ref("payroll-runs", r.paidRunId),
     paid_time: r.paidAt ? iso(r.paidAt) : undefined,
   };

@@ -10,6 +10,7 @@ import {
 import { putAttachment, downloadAttachment, attachedObjectIds, attachmentDisposition } from "../services/attachments";
 import { requireCappedBody } from "../services/documentsCommon";
 import { toReimbursementResource } from "../http/serialize";
+import { rejectBody, type RejectBody } from "../http/rejectBody";
 
 const COL = "reimbursements";
 const RECEIPT = "receipt"; // the attachment slot for a claim's receipt
@@ -55,7 +56,7 @@ export const reimbursements = collectionRoutes<ReimbursementInput, typeof schema
   },
   verbs: {
     approve: { run: (deps, user, id, _body, c) => approveReimbursement(deps, user, id, c.req.header("If-Match")) },
-    reject: { run: (deps, user, id, _body, c) => rejectReimbursement(deps, user, id, c.req.header("If-Match")) },
+    reject: { schema: rejectBody, run: (deps, user, id, body: RejectBody, c) => rejectReimbursement(deps, user, id, body.reason, c.req.header("If-Match")) },
     cancel: { run: (deps, user, id) => cancelReimbursement(deps, user, id) },
     pay: { run: (deps, user, id, _body, c) => payReimbursement(deps, user, id, c.req.header("If-Match")) },
     // The receipt goes up as raw bytes; the answer is the claim itself, now carrying its receipt flag.

@@ -13,7 +13,8 @@ import { notify, notifyManager } from "./notifications";
 import { emitEvent } from "./eventBus";
 import { invalidArgument, notFound, failedPrecondition } from "../lib/errors";
 import { keysetPage } from "./keysetPage";
-import { assertNotSubject, assertReviewedVersion } from "./decisionGuard";
+import { runBatchChecked } from "../lib/dbBatch";
+import { assertNotSubject, assertReviewedVersion, requireRejectReason } from "./decisionGuard";
 import { getSettingValue } from "./settings";
 import { currentComp, monthlyRecurringGross } from "./taxProjection";
 import { applyStructure } from "../domain/payroll";
@@ -335,7 +336,8 @@ export async function approveEncashment(deps: Deps, actor: AppUser, id: string, 
   return updated;
 }
 
-export async function rejectEncashment(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
+export async function rejectEncashment(deps: Deps, actor: AppUser, id: string, rawReason: string, ifMatch?: string) {
+  const reason = requireRejectReason(rawReason);
   const row = await getEncashment(deps, actor, id);
   if (row.state !== "PENDING") throw failedPrecondition("encashment is not pending");
   assertReviewedVersion(row, ifMatch);
@@ -349,11 +351,11 @@ export async function rejectEncashment(deps: Deps, actor: AppUser, id: string, i
   // The other ordering was always safe (a reject that lands first leaves approve's guard matching no rows, and
   // it 409s), which is exactly why this only ever went wrong in one direction and never in a test.
   const [updated] = await deps.db.update(schema.leaveEncashments)
-    .set({ state: "REJECTED", decidedBy: actor.uuid, updatedAt: new Date() })
+    .set({ state: "REJECTED", decidedBy: actor.uuid, decisionNote: reason, updatedAt: new Date() })
     .where(and(eq(schema.leaveEncashments.uuid, id), eq(schema.leaveEncashments.state, "PENDING"))).returning();
   if (!updated) throw failedPrecondition("encashment is no longer pending");
-  await audit(deps, actor, "leave_encashment.reject", "leave-encashments", id, stateMeta(row.state, "REJECTED", { employee: `employees/${row.employeeId}` }), updated);
-  await notify(deps, { recipient: row.employeeId, type: "encashment.rejected", title: "Leave encashment rejected", body: `Your encashment of ${row.days} day(s) was rejected.`, link: "leave-requests/encashments", subject: `leave-encashments/${id}`, actorId: actor.employeeId });
+  await audit(deps, actor, "leave_encashment.reject", "leave-encashments", id, stateMeta(row.state, "REJECTED", { employee: `employees/${row.employeeId}`, reason }), updated);
+  await notify(deps, { recipient: row.employeeId, type: "encashment.rejected", title: "Leave encashment rejected", body: `Your encashment of ${row.days} day(s) was rejected: ${reason}`, link: "leave-requests/encashments", subject: `leave-encashments/${id}`, actorId: actor.employeeId });
   return updated;
 }
 
@@ -362,12 +364,32 @@ export async function cancelEncashment(deps: Deps, actor: AppUser, id: string) {
   if (row.state !== "PENDING" && row.state !== "APPROVED") throw failedPrecondition("only pending or unpaid approved encashments can be cancelled");
   // Guard the flip on the state we read so cancel is EXACTLY-ONCE: a double-clicked cancel of an APPROVED row
   // would otherwise credit the days back twice (balance inflation). Only the winner credits.
+  //
+  // Cancelling an APPROVED row credits the days back IN THE SAME BATCH as the flip, as leaveRequests.ts does
+  // for its refund: as two writes, a failure between them left the encashment cancelled with the days gone,
+  // and the guard made that permanent (a retry finds it CANCELLED and refuses). The credit goes first and
+  // carries the flip's own precondition, so a lost race writes neither half. Approval debited an existing
+  // balance row, so there is always one to credit.
   const from = row.state;
-  const [updated] = await deps.db.update(schema.leaveEncashments)
-    .set({ state: "CANCELLED", decidedBy: actor.uuid, updatedAt: new Date() })
-    .where(and(eq(schema.leaveEncashments.uuid, id), eq(schema.leaveEncashments.state, from))).returning();
-  if (!updated) throw failedPrecondition("encashment is no longer cancellable");
-  if (from === "APPROVED") await adjustBalance(deps, row.employeeId, row.leaveTypeId, row.days); // credit the days back
+  const at = new Date();
+  const credit = from === "APPROVED"
+    ? [deps.db.update(schema.leaveBalances)
+        .set({ balanceDays: sql`round((${schema.leaveBalances.balanceDays} + ${row.days}) * 100) / 100`, updatedAt: at })
+        .where(and(
+          eq(schema.leaveBalances.employeeId, row.employeeId),
+          eq(schema.leaveBalances.leaveTypeId, row.leaveTypeId),
+          sql`exists (select 1 from ${schema.leaveEncashments} where ${schema.leaveEncashments.uuid} = ${id} and ${schema.leaveEncashments.state} = 'APPROVED')`,
+        ))]
+    : [];
+  const flip = {
+    stmt: deps.db.update(schema.leaveEncashments)
+      .set({ state: "CANCELLED" as const, decidedBy: actor.uuid, updatedAt: at })
+      .where(and(eq(schema.leaveEncashments.uuid, id), eq(schema.leaveEncashments.state, from))).returning(),
+    expect: 1,
+    label: "cancel the encashment",
+  };
+  if ((await runBatchChecked(deps.db, [...credit, flip])).length) throw failedPrecondition("encashment is no longer cancellable");
+  const updated = (await deps.db.select().from(schema.leaveEncashments).where(eq(schema.leaveEncashments.uuid, id)).limit(1))[0]!;
   await audit(deps, actor, "leave_encashment.cancel", "leave-encashments", id, stateMeta(from, "CANCELLED", { employee: `employees/${row.employeeId}` }), updated);
   return updated;
 }

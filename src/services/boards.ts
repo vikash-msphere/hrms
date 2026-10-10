@@ -17,8 +17,8 @@ import { invalidArgument, notFound, aborted } from "../lib/errors";
 import { etagOf } from "../http/serialize";
 import { deleteStateFilter, softDeleteRow, restoreRow, purgeRow, type PurgeCascade } from "./softDelete";
 import {
-  DEFAULT_BOARD_COLUMNS, DEFAULT_SCRUM_COLUMNS, normalizeColumns, requireEntryColumn, normalizeSwimlanes, normalizeLabels,
-  cleanPrefix, normalizePrefix, derivePrefix, parseColumns, type SwimlaneMode, SWIMLANE_MODES,
+  DEFAULT_BOARD_COLUMNS, DEFAULT_SCRUM_COLUMNS, DEFAULT_TASK_TYPES, normalizeColumns, requireEntryColumn, normalizeSwimlanes, normalizeLabels,
+  normalizeTaskTypes, TASK_TYPE_DISPLAYS, type TaskTypeDisplay, cleanPrefix, normalizePrefix, derivePrefix, parseColumns, type SwimlaneMode, SWIMLANE_MODES,
 } from "../domain/boards";
 import { computeBoardMetrics } from "../domain/boardMetrics";
 import { checkEtag, updateAtVersion } from "./versionGuard";
@@ -35,6 +35,8 @@ export type BoardInput = {
   swimlane_mode?: string;
   swimlanes?: unknown;
   labels?: unknown;
+  task_types?: unknown;
+  task_type_display?: TaskTypeDisplay;
   hide_empty_lanes?: boolean;
   reassign_lane_on_move?: boolean;
   no_lane_label?: string | null;
@@ -135,6 +137,8 @@ export async function createBoard(deps: Deps, actor: AppUser, input: BoardInput,
       swimlaneMode: mode,
       swimlanesJson: JSON.stringify(swimlanes),
       labelsJson: JSON.stringify(input.labels != null ? asArgError(() => normalizeLabels(input.labels)) : []),
+      taskTypesJson: JSON.stringify(input.task_types != null ? asArgError(() => normalizeTaskTypes(input.task_types)) : DEFAULT_TASK_TYPES),
+      ...(input.task_type_display ? { taskTypeDisplay: oneOf(input.task_type_display, TASK_TYPE_DISPLAYS, "task_type_display must be icon, label or both") } : {}),
     })
     .returning()))[0]!;
   await syncBoardShares(deps, actor, row.uuid);
@@ -251,6 +255,8 @@ export async function configureBoard(deps: Deps, actor: AppUser, id: string, inp
   }
   if (has("swimlanes")) set.swimlanesJson = JSON.stringify(asArgError(() => normalizeSwimlanes(input.swimlanes)));
   if (has("labels")) set.labelsJson = JSON.stringify(asArgError(() => normalizeLabels(input.labels)));
+  if (has("task_types")) set.taskTypesJson = JSON.stringify(asArgError(() => normalizeTaskTypes(input.task_types)));
+  if (has("task_type_display")) set.taskTypeDisplay = oneOf(input.task_type_display, TASK_TYPE_DISPLAYS, "task_type_display must be icon, label or both");
   if (has("hide_empty_lanes")) set.hideEmptyLanes = !!input.hide_empty_lanes;
   if (has("reassign_lane_on_move")) set.reassignLaneOnMove = !!input.reassign_lane_on_move;
   if (has("no_lane_label")) set.noLaneLabel = (input.no_lane_label ?? "").toString().trim() || null;

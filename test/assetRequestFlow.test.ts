@@ -95,8 +95,7 @@ describe("asking for kit", () => {
     expect(approved.decisionNote).toBe("Ordering one");
     // A second decision on a decided request is refused rather than overwriting the first.
     await expect(approveAssetRequest(deps, hr, req.uuid)).rejects.toThrow(/not pending/i);
-    await expect(rejectAssetRequest(deps, hr, req.uuid)).rejects.toThrow(/not pending/i);
-    await expect(cancelAssetRequest(deps, employee, req.uuid)).rejects.toThrow(/only pending/i);
+    await expect(rejectAssetRequest(deps, hr, req.uuid, "None in stock")).rejects.toThrow(/not pending/i);
 
     const notes = await deps.db.select().from(schema.notifications);
     expect(notes.some((n) => n.recipientId === employee.employeeId && n.type === "asset.requestApproved")).toBe(true);
@@ -108,6 +107,23 @@ describe("asking for kit", () => {
     const cat = await laptopCategory(hr);
     const req = await createAssetRequest(deps, employee, { category: `asset-categories/${cat.uuid}` });
     expect((await cancelAssetRequest(deps, employee, req.uuid)).state).toBe("CANCELLED");
+  });
+
+  it("the owner can withdraw an approved request until something is handed over, never after", async () => {
+    const hr = await seedActor("hr_admin");
+    const employee = await seedActor();
+    const cat = await laptopCategory(hr);
+    const unneeded = await createAssetRequest(deps, employee, { category: `asset-categories/${cat.uuid}` });
+    await approveAssetRequest(deps, hr, unneeded.uuid);
+    expect((await cancelAssetRequest(deps, employee, unneeded.uuid)).state).toBe("CANCELLED");
+    // Withdrawn means withdrawn: it can no longer be handed over against.
+    const spare = await createAsset(deps, hr, { name: "Spare laptop", category: `asset-categories/${cat.uuid}`, serial_number: "SN-W1" });
+    await expect(issueAssetRequest(deps, hr, unneeded.uuid, `assets/${spare.uuid}`)).rejects.toThrow(/only an approved request/i);
+
+    const issued = await createAssetRequest(deps, employee, { category: `asset-categories/${cat.uuid}` });
+    await approveAssetRequest(deps, hr, issued.uuid);
+    await issueAssetRequest(deps, hr, issued.uuid, `assets/${spare.uuid}`);
+    await expect(cancelAssetRequest(deps, employee, issued.uuid)).rejects.toThrow(/not been handed over/i);
   });
 });
 

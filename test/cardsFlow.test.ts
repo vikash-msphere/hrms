@@ -15,7 +15,7 @@ import { createGoal } from "../src/services/goals";
 import { createSprint, activateSprint, completeSprint } from "../src/services/sprints";
 import { listActivity, listAllActivity } from "../src/services/activity";
 import { etagOf } from "../src/http/serialize";
-import { DEFAULT_BOARD_COLUMNS, parseColumns } from "../src/domain/boards";
+import { DEFAULT_BOARD_COLUMNS, DEFAULT_TASK_TYPES, parseColumns } from "../src/domain/boards";
 
 // Real-D1 (miniflare) flow test for the kanban board: WIP enforcement, commitment/delivery timestamps, the
 // movement log feeding analytics, and the delivery -> goal roll-up. Exercises the actual services end to end.
@@ -371,6 +371,61 @@ describe("kanban flow: WIP + timestamps + movements + goal roll-up", () => {
     const card = await createCard(deps, actor, { board: `boards/${board.uuid}`, title: "Fix", labels: ["bug", "bug", "urgent"] });
     const c = await cardRow(card.uuid);
     expect(JSON.parse(c.labelsJson)).toEqual(["bug", "urgent"]); // deduped
+  });
+
+  it("gives a new board the starter task types, and keeps a catalog the caller sends", async () => {
+    const actor = await seedActor();
+    const plain = await createBoard(deps, actor, { name: "Plain" });
+    expect(JSON.parse(plain.taskTypesJson)).toEqual(DEFAULT_TASK_TYPES);
+    const own = await createBoard(deps, actor, { name: "Own", task_types: [{ key: "story", label: "Story", icon: "story" }] });
+    expect(JSON.parse(own.taskTypesJson)).toEqual([{ key: "story", label: "Story", icon: "story" }]);
+    await expect(createBoard(deps, actor, { name: "Dupes", task_types: [{ key: "bug", label: "Bug" }, { key: "bug", label: "Bug 2" }] })).rejects.toThrow(/duplicate task type key/);
+  });
+
+  it("shows a task's type on its card as the icon unless the board says the name, or both", async () => {
+    const actor = await seedActor();
+    const board = await createBoard(deps, actor, { name: "Display" });
+    expect(board.taskTypeDisplay).toBe("icon");
+    expect((await configureBoard(deps, actor, board.uuid, { task_type_display: "both" })).taskTypeDisplay).toBe("both");
+    expect((await configureBoard(deps, actor, board.uuid, { task_type_display: "label" })).taskTypeDisplay).toBe("label");
+    await expect(configureBoard(deps, actor, board.uuid, { task_type_display: "emoji" as never })).rejects.toThrow(/icon, label or both/);
+    expect((await createBoard(deps, actor, { name: "Named", task_type_display: "label" })).taskTypeDisplay).toBe("label");
+  });
+
+  it("types a task from the board's catalog: set, changed, cleared, and refused when the board has no such type", async () => {
+    const actor = await seedActor();
+    const board = await createBoard(deps, actor, { name: "Typed" });
+    const b = `boards/${board.uuid}`;
+    await expect(createCard(deps, actor, { board: b, title: "Mystery", task_type: "epic" })).rejects.toThrow(/not a task type on this board/);
+    const card = await createCard(deps, actor, { board: b, title: "Crash on save", task_type: "bug" });
+    expect(card.taskType).toBe("bug");
+    expect((await createCard(deps, actor, { board: b, title: "Untyped" })).taskType).toBeNull();
+
+    let row = await updateCard(deps, actor, card.uuid, { task_type: "feature" });
+    expect(row.taskType).toBe("feature");
+    await expect(updateCard(deps, actor, card.uuid, { task_type: "epic" })).rejects.toThrow(/not a task type/);
+    // "" is how the SPA clears a field (no nulls on the wire); both mean untyped.
+    row = await updateCard(deps, actor, card.uuid, { task_type: "" });
+    expect(row.taskType).toBeNull();
+    // A patch that does not name the type leaves it alone.
+    await updateCard(deps, actor, card.uuid, { task_type: "chore" });
+    row = await updateCard(deps, actor, card.uuid, { title: "Crash on save (prod)" });
+    expect(row.taskType).toBe("chore");
+  });
+
+  it("a task-type swimlane drop retypes the task, and the untyped lane clears it", async () => {
+    const actor = await seedActor();
+    const board = await createBoard(deps, actor, { name: "Lanes by type", swimlane_mode: "task_type" });
+    const card = await createCard(deps, actor, { board: `boards/${board.uuid}`, title: "Lane hopper", task_type: "bug" });
+    let row = await moveCard(deps, actor, card.uuid, { column: "backlog", taskType: "chore" });
+    expect(row.taskType).toBe("chore");
+    await expect(moveCard(deps, actor, card.uuid, { column: "backlog", taskType: "epic" })).rejects.toThrow(/not a task type/);
+    row = await moveCard(deps, actor, card.uuid, { column: "backlog", taskType: null });
+    expect(row.taskType).toBeNull();
+    // Absent leaves it alone: an ordinary column move does not touch the type.
+    await updateCard(deps, actor, card.uuid, { task_type: "feature" });
+    row = await moveCard(deps, actor, card.uuid, { column: "ready" });
+    expect(row.taskType).toBe("feature");
   });
 
   it("assigns per-board incrementing task keys (PREFIX-N)", async () => {

@@ -22,7 +22,7 @@ import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
 import { confirmDecision } from "@/lib/confirmDecision";
 import { FOCUSED_ROW, useFocusedRequest, useScrollToFocused } from "@/components/common/EmployeeRequests";
-import { DecisionButtons, RejectDialog, type RejectTarget } from "@/components/common/ApprovalRow";
+import { DecisionButtons, useRejectRequest } from "@/components/common/ApprovalRow";
 
 const EMPTY_REQUEST = { category: "", neededBy: "", justification: "" };
 
@@ -90,7 +90,7 @@ export function EmployeeAssets({
   useEffect(() => { load(); }, [load]);
   // `?request=asset-requests/<id>`: the approver's "Open" - that request is picked out and scrolled to.
   const focusedId = useFocusedRequest("asset-requests");
-  const [rejecting, setRejecting] = useState<RejectTarget | null>(null);
+  const reject = useRejectRequest(load);
   const focusRef = useScrollToFocused<HTMLDivElement>(focusedId, requests.length > 0);
 
   // Open requests lead: a pending one is a decision somebody owes, an approved one is kit somebody owes.
@@ -270,13 +270,14 @@ export function EmployeeAssets({
                       what={`${employeeName ?? "This person"}'s request for ${catName(r.category) || "an asset"}`}
                       own={isSelf}
                       onApproved={load}
-                      onRejectClick={() => setRejecting({ collection: "asset-requests", row: r, name: employeeName ?? "", summary: catName(r.category) || "Asset" })}
+                      onRejectClick={() => reject({ collection: "asset-requests", row: r, name: employeeName ?? "", summary: catName(r.category) || "Asset" })}
                       buttonClassName="h-6 px-2 text-[11px]"
                     />
                     {r.state === "APPROVED" && r.access?.can?.includes("issue") && (
                       <Button size="sm" variant="outline" className="h-6 px-2 text-[11px]" onClick={() => openAssign(r)}><HandHeart className="h-3 w-3" /> Hand over</Button>
                     )}
-                    {r.state === "PENDING" && r.access?.can?.includes("cancel") && (
+                    {/* Withdrawable until something is handed over: an approved request the person no longer needs too. */}
+                    {(r.state === "PENDING" || r.state === "APPROVED") && r.access?.can?.includes("cancel") && (
                       <Button size="sm" variant="ghost" className="h-6 px-2 text-[11px]" onClick={() => withdraw(r)}><X className="h-3 w-3" /> Withdraw</Button>
                     )}
                   </span>
@@ -287,8 +288,6 @@ export function EmployeeAssets({
           </div>
         )}
       </CardContent>
-
-      <RejectDialog target={rejecting} onClose={() => setRejecting(null)} onRejected={load} />
 
       <WriteDialog
         open={open}

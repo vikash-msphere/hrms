@@ -9,6 +9,7 @@ import { notFound, invalidArgument, failedPrecondition } from "../lib/errors";
 import { getEmployeeTaxProjection, readDeclarations, readRawTaxDetails, type TaxDeclarations, type TaxProjection } from "./taxProjection";
 import type { Wire } from "../http/wire";
 import { checkSubEtag, subResourceEtag, updateAtVersion } from "./versionGuard";
+import { requireRejectReason } from "./decisionGuard";
 
 // Income-tax (TDS) sub-resource: stores only the employee's manual DECLARATIONS (prior-employer income + TDS
 // for mid-year joiners) as an encrypted blob - everything else (the year's tax, the monthly schedule, the
@@ -76,6 +77,7 @@ function toView(p: TaxProjection, decl: TaxDeclarations): Omit<Wire<"tax">, "pat
     prior_employer_income: decl.priorEmployerIncome ?? 0, // declared
     prior_employer_tds: decl.priorEmployerTds ?? 0, // declared
     verification_status: declared ? decl.status ?? "DECLARED" : null,
+    rejection_reason: decl.status === "REJECTED" ? decl.rejectionReason ?? null : null,
     verified_income: decl.verifiedIncome ?? null,
     verified_tds: decl.verifiedTds ?? null,
     prior_employer_income_effective: p.priorEmployerIncome, // verified-only, as used by the projection
@@ -179,12 +181,16 @@ export async function setTaxDetails(deps: Deps, actor: AppUser, employeeId: stri
     if (isSelf) throw failedPrecondition("previous employer details must be verified by another HR/payroll user, not the subject employee");
     if (raw.priorEmployerIncome == null && raw.priorEmployerTds == null) throw failedPrecondition("nothing has been declared to verify");
     if (action === "reject") {
-      next = { ...raw, status: "REJECTED", verifiedIncome: undefined, verifiedTds: undefined, decidedBy: actor.uuid, decidedAt: new Date().toISOString() };
+      // Required like every other rejection's reason: the employee is asked to re-declare, and has to be told
+      // what was wrong with the figures they gave.
+      const reason = requireRejectReason(typeof input.reason === "string" ? input.reason : null);
+      next = { ...raw, status: "REJECTED", verifiedIncome: undefined, verifiedTds: undefined, decidedBy: actor.uuid, decidedAt: new Date().toISOString(), rejectionReason: reason };
       event = "reject";
     } else {
       // Accept the declared figures, or an explicit override; stamp VERIFIED. Amounts are non-negative (num()).
       next = {
         ...raw,
+        rejectionReason: undefined,
         status: "VERIFIED",
         verifiedIncome: num(input.verified_income) ?? raw.priorEmployerIncome ?? 0,
         verifiedTds: num(input.verified_tds) ?? raw.priorEmployerTds ?? 0,
@@ -220,7 +226,7 @@ export async function setTaxDetails(deps: Deps, actor: AppUser, employeeId: stri
   if (event === "verify") {
     await notify(deps, { recipient: employeeId, type: "tax.verified", title: "Previous employer details verified", body: "Your declared income and TDS from a previous employer were verified and now apply to your tax projection.", link: "profile" });
   } else if (event === "reject") {
-    await notify(deps, { recipient: employeeId, type: "tax.rejected", title: "Previous employer declaration rejected", body: "Your previous employer declaration was not accepted. Please review and re-declare.", link: "profile" });
+    await notify(deps, { recipient: employeeId, type: "tax.rejected", title: "Previous employer declaration rejected", body: `Your previous employer declaration was not accepted: ${next.rejectionReason}. Please review and re-declare.`, link: "profile" });
   } else if (next.priorEmployerIncome != null || next.priorEmployerTds != null) {
     // A new/changed declaration needs HR/payroll verification before it affects withholding: alert the
     // verifiers (the roles that hold the tax capability) so it doesn't sit unseen. Deep-links to the profile.

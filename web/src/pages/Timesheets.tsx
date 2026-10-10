@@ -29,8 +29,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Combobox } from "@/components/ui/combobox";
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
-import { useConfirm } from "@/components/common/confirm";
-import { confirmDecision } from "@/lib/confirmDecision";
+import { useAskReason, useConfirm } from "@/components/common/confirm";
+import { askDecision, confirmDecision } from "@/lib/confirmDecision";
 
 // The grid's week is a run of seven DAY STRINGS, stepped with lib/orgDay. It used to hold a local `Date` for
 // the week start and format it with a local `ymd`: the week the page opened on was then the BROWSER's week
@@ -66,6 +66,7 @@ export default function Timesheets({ me }: { me: Me }) {
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { toast } = useToast();
   const confirm = useConfirm();
+  const askReason = useAskReason();
   const [submitting, setSubmitting] = useState(false);
   const [copying, setCopying] = useState(false); // "copy last week" in flight
   const [deciding, setDeciding] = useState<string | null>(null); // "<path>|<verb>" of the in-flight decision
@@ -203,11 +204,14 @@ export default function Timesheets({ me }: { me: Me }) {
   const dayCell = (p: Project, d: string) => {
     const e = byCell.get(`${idOf(p.path)}|${d}`);
     const locked = e && (e.status === "SUBMITTED" || e.status === "APPROVED");
+    // A rejected cell says why on hover and to a screen reader: it is the cell the person has to fix.
+    const rejected = e?.status === "REJECTED" && e.decision_note ? `Rejected: ${e.decision_note}` : undefined;
     return (
       <button
         type="button"
         disabled={!!locked}
-        aria-label={`${p.name}, ${d}${e ? `, ${fmt(e.hours)} hours` : ", no hours logged"}`}
+        title={rejected}
+        aria-label={`${p.name}, ${d}${e ? `, ${fmt(e.hours)} hours` : ", no hours logged"}${rejected ? `. ${rejected}` : ""}`}
         onClick={() => setCell({ projectId: idOf(p.path), date: d, existing: e })}
         className={cn(
           "h-10 w-full rounded-md text-sm tabular-nums transition-colors",
@@ -335,10 +339,11 @@ export default function Timesheets({ me }: { me: Me }) {
     }
   }
   async function decide(e: TimeEntry, verb: "approve" | "reject") {
-    if (!(await confirmDecision(confirm, verb, `${e.hours}h logged on ${formatDate(e.date)}`))) return;
+    const body = await askDecision({ confirm, askReason }, verb, `${e.hours}h logged on ${formatDate(e.date)}`);
+    if (body === null) return;
     setDeciding(`${e.path}|${verb}`);
     try {
-      await invoke(`time-entries/${idOf(e.path)}`, verb, e.etag); // decided against the version on screen
+      await invoke(`time-entries/${idOf(e.path)}`, verb, e.etag, body); // decided against the version on screen
       toast({ title: verb === "approve" ? "Entry approved" : "Entry rejected", variant: "success" });
       // Awaited: `deciding` clears in `finally` right after this, which re-offers the Approve/Reject buttons -
       // an un-awaited reload left the just-decided row on screen, inviting a second decide on an entry the

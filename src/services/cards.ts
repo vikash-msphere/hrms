@@ -21,7 +21,7 @@ import { emitEvent } from "./eventBus";
 import { updateGoalProgress } from "./goals";
 import { notify } from "./notifications";
 import { notifyMentions } from "./mentions";
-import { parseColumns, commitmentIndex, columnIndex, entryColumn, normalizeLabelKeys, CARD_PRIORITIES, type CardPriority } from "../domain/boards";
+import { parseColumns, parseTaskTypes, commitmentIndex, columnIndex, entryColumn, normalizeLabelKeys, CARD_PRIORITIES, type CardPriority } from "../domain/boards";
 import { runBatch, insertBatches, byIdChunks } from "../lib/dbBatch";
 import { checkEtag, updateAtVersion } from "./versionGuard";
 
@@ -117,7 +117,7 @@ export async function watchCard(deps: Deps, actor: AppUser, id: string, on: bool
  * the new card (claimed with a conditional update, so two ticks racing can only produce one), which keeps
  * exactly one live card per series - the same invariant recurring 1:1s run on.
  *
- * Carried over: title, description, assignee, department, priority, size, labels and the checklist, unticked -
+ * Carried over: title, description, assignee, department, priority, task type, size, labels and the checklist, unticked -
  * everything that makes it the same chore. Deliberately not carried: the linked GOAL (a series would inflate
  * that goal's task count forever) and the SPRINT (a time box the next one is not in).
  */
@@ -141,7 +141,7 @@ export async function rollRecurringCards(deps: Deps): Promise<number> {
       isNotNull(schema.cards.cadence),
       isNotNull(schema.cards.deliveredAt),
     ))
-    .orderBy(asc(schema.cards.deliveredAt), asc(schema.cards.uuid))).map((r) => r.cards);
+    .orderBy(asc(schema.cards.deliveredAt), asc(schema.cards.uuid))).map((r) => ({ ...r.cards, boardTaskTypes: parseTaskTypes(r.boards.taskTypesJson) }));
   // CAPPED PER TICK, for the reason the recurring-expense sweep is (services/expenses.ts): each series below
   // costs the better part of a dozen subrequests - the claim, the checklist read, the create, the anchor and
   // reporter stamps, the watcher insert, the landed check - and none of it batches, because the claim decides
@@ -210,6 +210,9 @@ export async function rollRecurringCards(deps: Deps): Promise<number> {
         assignee: r.assigneeId ? `employees/${r.assigneeId}` : null,
         ...(r.departmentId ? { department: `departments/${r.departmentId}` } : { department: null }),
         priority: r.priority,
+        // Only while the board still offers it: createCard refuses a type the catalog dropped, and a create that
+        // throws here is the claimed-but-not-filed outcome the claim above exists to avoid.
+        task_type: r.taskType && r.boardTaskTypes.some((t) => t.key === r.taskType) ? r.taskType : null,
         size: r.size,
         labels: (() => { try { return JSON.parse(r.labelsJson) as string[]; } catch { return []; } })(),
         due_date: next.toISOString().slice(0, 10),
@@ -297,6 +300,7 @@ export type CardInput = {
   description?: string | null;
   assignee?: string | null;
   priority?: CardPriority;
+  task_type?: string | null; // a key in the board's task-type catalog; null = untyped
   labels?: unknown;
   documents?: string[]; // org-document refs to link (link-only; replaces the whole set on patch)
   size?: number | null;
@@ -307,7 +311,13 @@ export type CardInput = {
 };
 export type CardCadence = NonNullable<typeof schema.cards.$inferSelect["cadence"]>;
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
-const dayMs = (s?: string | null) => (s ? Date.parse(s + "T00:00:00Z") : NaN);
+// A card's type as written: blank is untyped, anything else must be in the board's catalog.
+const taskTypeOn = (typesJson: string, key?: string | null) => {
+  if (!key) return null;
+  if (!parseTaskTypes(typesJson).some((t) => t.key === key)) throw invalidArgument(`task_type "${key}" is not a task type on this board`);
+  return key;
+};
+const dayMs =(s?: string | null) => (s ? Date.parse(s + "T00:00:00Z") : NaN);
 
 // Cards in a board column (non-deleted), for WIP counting + rank append. Optionally excluding one card.
 /**
@@ -559,6 +569,7 @@ export async function createCard(deps: Deps, actor: AppUser, input: CardInput, i
   // Department: explicit value (incl. null) wins; when the key is omitted, fall back to the org default.
   const departmentId = "department" in input ? (idFromPath(input.department) ?? null) : await getDefaultDepartmentId(deps);
   if (input.priority && !CARD_PRIORITIES.includes(input.priority)) throw invalidArgument("priority is invalid");
+  const taskType = taskTypeOn(board.taskTypesJson, input.task_type);
   const due = dayMs(input.due_date);
   if (input.due_date && Number.isNaN(due)) throw invalidArgument("due_date is invalid");
   // Append to the end of the target column unless a rank was supplied.
@@ -597,6 +608,7 @@ export async function createCard(deps: Deps, actor: AppUser, input: CardInput, i
       description: input.description?.trim() || null,
       assigneeId: idFromPath(input.assignee) ?? null,
       priority: input.priority ?? "medium",
+      taskType,
       labelsJson: JSON.stringify(normalizeLabelKeys(input.labels ?? [])),
       documentsJson: JSON.stringify((input.documents ?? []).map((p) => idFromPath(p)).filter(Boolean)),
       size: input.size ?? null,
@@ -620,7 +632,7 @@ export async function createCard(deps: Deps, actor: AppUser, input: CardInput, i
     await deps.db.insert(schema.cardWatchers).values({ cardId: row.uuid, employeeId: row.reporterId }).onConflictDoNothing();
   }
   await notifyCardAssigned(deps, actor, row, null);
-  await emitEvent(deps, actor, "card.created", { subject: `cards/${row.uuid}`, employeeId, payload: { board: `boards/${boardId}`, column: columnKey, priority: row.priority } });
+  await emitEvent(deps, actor, "card.created", { subject: `cards/${row.uuid}`, employeeId, payload: { board: `boards/${boardId}`, column: columnKey, priority: row.priority, taskType: row.taskType } });
   await recomputeGoalProgress(deps, actor, row.goalId); // a new linked task lowers its goal's delivered share
   return row;
 }
@@ -643,6 +655,10 @@ export async function updateCard(deps: Deps, actor: AppUser, id: string, patch: 
   if (has("priority")) {
     if (patch.priority && !CARD_PRIORITIES.includes(patch.priority)) throw invalidArgument("priority is invalid");
     set.priority = patch.priority;
+  }
+  if (has("task_type")) {
+    const board = (await deps.db.select({ taskTypesJson: schema.boards.taskTypesJson }).from(schema.boards).where(eq(schema.boards.uuid, row.boardId)).limit(1))[0];
+    set.taskType = taskTypeOn(board?.taskTypesJson ?? "[]", patch.task_type);
   }
   if (has("labels")) set.labelsJson = JSON.stringify(normalizeLabelKeys(patch.labels ?? []));
   if (has("documents")) set.documentsJson = JSON.stringify((patch.documents ?? []).map((p) => idFromPath(p)).filter(Boolean));
@@ -683,12 +699,13 @@ export type MoveCardTarget = {
   assignee?: string | null;
   goal?: string | null;
   priority?: string | null;
+  taskType?: string | null;
   department?: string | null;
   sprint?: string | null;
 };
 
 export async function moveCard(deps: Deps, actor: AppUser, id: string, to: MoveCardTarget, ifMatch?: string) {
-  const { column: toColumn, swimlane: toSwimlane, rank, assignee: toAssignee, goal: toGoal, priority: toPriority, department: toDepartment, sprint: toSprint } = to;
+  const { column: toColumn, swimlane: toSwimlane, rank, assignee: toAssignee, goal: toGoal, priority: toPriority, taskType: toTaskType, department: toDepartment, sprint: toSprint } = to;
   const row = await getCard(deps, actor, id);
   if (row.deleteTime) throw notFound("card not found");
   // The SPA has always sent the card's ETag with a move (`invoke(..., "move", card.etag, move)`), and the
@@ -728,6 +745,8 @@ export async function moveCard(deps: Deps, actor: AppUser, id: string, to: MoveC
   if (toGoal !== undefined) set.goalId = idFromPath(toGoal) ?? null;
   // priority is a required enum - a NONE lane drop leaves it unchanged
   if (toPriority) set.priority = oneOf(toPriority, CARD_PRIORITIES, "priority is invalid");
+  // task type is optional - the "No type" lane clears it
+  if (toTaskType !== undefined) set.taskType = taskTypeOn(board.taskTypesJson, toTaskType);
   if (toDepartment !== undefined) set.departmentId = idFromPath(toDepartment) ?? null;
   // Backlog <-> sprint in the same atomic move (null = backlog), same semantics as PATCH `sprint`.
   if (toSprint !== undefined) set.sprintId = idFromPath(toSprint) ?? null;

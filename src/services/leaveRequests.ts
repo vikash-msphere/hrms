@@ -36,7 +36,7 @@ import { scheduleCtxWith } from "./workSchedule";
 import { refHolidays, refLeaveTypes } from "../lib/refData";
 import { getAttachment } from "./attachments";
 import { runBatchChecked, type BatchStmt, type CheckedStmt } from "../lib/dbBatch";
-import { assertNotSubject, assertReviewedVersion } from "./decisionGuard";
+import { assertNotSubject, assertReviewedVersion, requireRejectReason } from "./decisionGuard";
 
 // Holidays (UTC YYYY-MM-DD) in [startMs, endMs] - the days leave shouldn't count. Non-deleted, non-disabled
 // holidays of any kind, minus the location-scoped ones that aren't this employee's (a Mumbai-only holiday must
@@ -620,7 +620,7 @@ async function leaveRefundStmts(deps: Deps, requestId: string, from: string, emp
     ))];
 }
 
-async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "REJECTED" | "CANCELLED", ifMatch?: string) {
+async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "REJECTED" | "CANCELLED", ifMatch?: string, reason?: string) {
   const row = await getLeaveRequest(deps, actor, id);
   assertReviewedVersion(row, ifMatch);
   // Approved leave excuses the days it covers (and unpaid leave is only docked if somebody else decided it), so
@@ -681,7 +681,7 @@ async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "
   const flip: CheckedStmt = {
     stmt: deps.db
       .update(schema.leaveRequests)
-      .set({ state: to, decidedBy: actor.uuid, updatedAt: new Date() })
+      .set({ state: to, decidedBy: actor.uuid, decisionNote: reason ?? null, updatedAt: new Date() })
       .where(and(eq(schema.leaveRequests.uuid, id), eq(schema.leaveRequests.state, from)))
       .returning(),
     expect: 1,
@@ -703,9 +703,9 @@ async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "
   const drifted = await runBatchChecked(deps.db, [...refund, flip]);
   if (drifted.length) throw failedPrecondition("request was already decided");
   const updated = (await deps.db.select().from(schema.leaveRequests).where(eq(schema.leaveRequests.uuid, id)).limit(1))[0]!;
-  await audit(deps, actor, `leave_request.${to.toLowerCase()}`, "leave-requests", id, stateMeta(from, to, { employee: `employees/${row.employeeId}` }), updated);
+  await audit(deps, actor, `leave_request.${to.toLowerCase()}`, "leave-requests", id, stateMeta(from, to, { employee: `employees/${row.employeeId}`, ...(reason ? { reason } : {}) }), updated);
   if (to === "APPROVED" || to === "REJECTED") {
-    await notify(deps, { recipient: row.employeeId, type: `leave.${to.toLowerCase()}`, title: `Leave ${to.toLowerCase()}`, body: `Your leave request was ${to.toLowerCase()}.`, link: "leave-requests/history", subject: `leave-requests/${id}`, actorId: actor.employeeId });
+    await notify(deps, { recipient: row.employeeId, type: `leave.${to.toLowerCase()}`, title: `Leave ${to.toLowerCase()}`, body: reason ? `Your leave request was rejected: ${reason}` : `Your leave request was ${to.toLowerCase()}.`, link: "leave-requests/history", subject: `leave-requests/${id}`, actorId: actor.employeeId });
   }
   // No event for taking an import back out: it is a correction to history, and an automation keyed on
   // "leave cancelled" (a cover arrangement, a calendar entry) has nothing to act on for leave years ago.
@@ -727,5 +727,5 @@ async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "
 }
 
 export const approveLeaveRequest = (deps: Deps, actor: AppUser, id: string, ifMatch?: string) => decide(deps, actor, id, "APPROVED", ifMatch);
-export const rejectLeaveRequest = (deps: Deps, actor: AppUser, id: string, ifMatch?: string) => decide(deps, actor, id, "REJECTED", ifMatch);
+export const rejectLeaveRequest = async (deps: Deps, actor: AppUser, id: string, reason: string, ifMatch?: string) => decide(deps, actor, id, "REJECTED", ifMatch, requireRejectReason(reason));
 export const cancelLeaveRequest = (deps: Deps, actor: AppUser, id: string) => decide(deps, actor, id, "CANCELLED");

@@ -852,7 +852,7 @@ export default function Goals({ me, openId, scope: forcedScope }: {
       toast({ title: "Couldn't update the goal", description: (e as Error).message, variant: "destructive" });
     }
   }
-  // Follow somebody else's goal. `reload()` rather than a local flip: the eye's state is a field on the goal
+  // Follow a goal. `reload()` rather than a local flip: the eye's state is a field on the goal
   // resource, so the list the drawer reads from has to carry the new value or the button springs back.
   async function toggleWatch(g: Goal) {
     try {
@@ -2496,7 +2496,7 @@ function GoalDrawer({ goal, owner, mine, parent, kids, kidOwnerName, onOpenGoal,
   /** Open the contributor editor for this goal. */
   onContributors: () => void;
   /** Follow / unfollow this goal (a toggle - the current state is `goal.watching`). */
-  onWatch: () => void;
+  onWatch: () => Promise<void>;
   /** Save the closing "what happened" note. */
   onRetro: (retro: string) => void;
   /** The goal-setting handshake: submit, agree, or send back with a reason. */
@@ -2669,25 +2669,7 @@ function GoalDrawer({ goal, owner, mine, parent, kids, kidOwnerName, onOpenGoal,
               <Button variant="ghost" size="icon" className="h-7 w-7" disabled={!canStep(1)} onClick={() => step(1)} aria-label="Next goal" title={dirty ? "Save your progress change first" : "Next goal (j)"}><ChevronRight className="h-4 w-4" /></Button>
             </>
           )}
-          {/* Follow somebody else's goal your own plans turn on: progress moves, comments, and the confidence
-              call turning at-risk. Not offered on your own goal - you are already told everything. */}
-          {!mine && (
-            <AccessAction verb={goal.watching ? "unwatch" : "watch"} can={can} label="Follow this goal">
-              <button
-                type="button"
-                onClick={onWatch}
-                title={goal.watching ? "Stop following this goal" : "Hear about progress, comments and slippage on this goal"}
-                className={cn("ml-auto inline-flex items-center gap-1 rounded px-1 py-0.5 transition-colors hover:text-foreground", goal.watching && "font-medium text-foreground")}
-              >
-                {/* The count, because a goal five people follow is a different object from one nobody reads -
-                    every progress move on it reaches five bells. The server has answered `watcher_count` on
-                    every row since watching existed and nothing had ever drawn it. */}
-                <Eye className="h-3.5 w-3.5" /> {goal.watching ? "Watching" : "Watch"}
-                {!!goal.watcher_count && <span className="tabular-nums">{goal.watcher_count}</span>}
-              </button>
-            </AccessAction>
-          )}
-          <button type="button" onClick={onCopyLink} title="Copy a link to this goal" className={cn("inline-flex items-center gap-1 rounded px-1 py-0.5 transition-colors hover:text-foreground", mine && "ml-auto")}>
+          <button type="button" onClick={onCopyLink} title="Copy a link to this goal" className="ml-auto inline-flex items-center gap-1 rounded px-1 py-0.5 transition-colors hover:text-foreground">
             <Link2 className="h-3.5 w-3.5" /> Copy link
           </button>
         </div>
@@ -3032,6 +3014,29 @@ function GoalDrawer({ goal, owner, mine, parent, kids, kidOwnerName, onOpenGoal,
         {!canEdit && goal.retro && (
           <FormSection stacked title="What happened" icon={PenLine}>
             <p className="whitespace-pre-wrap text-sm text-foreground/90">{goal.retro}</p>
+          </FormSection>
+        )}
+        {/* FOLLOWING, the same section a task has. Somebody else's goal your own plans turn on: its progress
+            moves, comments, and the confidence call turning at-risk. Your own goal: what a manager or contributor
+            moves or flags on it - your own changes never come back to you. Last on the tab: it is about the goal,
+            not part of working it. The count, because a goal five people follow is a different object from one
+            nobody reads - every progress move on it reaches five bells. */}
+        {(can.includes("watch") || can.includes("unwatch")) && (
+          <FormSection stacked title="Following" icon={Eye}>
+            <div className="flex flex-wrap items-center gap-2">
+              <AccessAction verb={goal.watching ? "unwatch" : "watch"} can={can} label="Follow this goal">
+                <Button variant={goal.watching ? "secondary" : "outline"} size="sm" className="h-7 text-xs" onClick={onWatch}>
+                  <Eye className="h-3.5 w-3.5" /> {goal.watching ? "Watching" : "Watch"}
+                </Button>
+              </AccessAction>
+              <span className="text-xs text-muted-foreground">
+                {goal.watcher_count
+                  ? `${goal.watcher_count} ${goal.watcher_count === 1 ? "person is" : "people are"} following progress, comments and slippage`
+                  : mine
+                    ? "Watch to hear when someone else moves or flags this goal"
+                    : "Nobody is following this yet"}
+              </span>
+            </div>
           </FormSection>
         )}
           </TabsContent>

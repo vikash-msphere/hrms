@@ -8,6 +8,7 @@ import {
   type LoanInput,
 } from "../services/loans";
 import { toLoanResource } from "../http/serialize";
+import { rejectBody, type RejectBody } from "../http/rejectBody";
 
 // `principal` and `installments` are BOUNDED, not merely typed.
 //
@@ -54,7 +55,7 @@ export const loans = collectionRoutes<LoanInput, typeof schema.loans>({
   verbs: {
     // If-Match binds a decision to the version the decider looked at (services/decisionGuard.ts).
     approve: { run: (deps, user, id, _body, c) => approveLoan(deps, user, id, c.req.header("If-Match")) },
-    reject: { run: (deps, user, id, _body, c) => rejectLoan(deps, user, id, c.req.header("If-Match")) },
+    reject: { schema: rejectBody, run: (deps, user, id, body: RejectBody, c) => rejectLoan(deps, user, id, body.reason, c.req.header("If-Match")) },
     disburse: { run: (deps, user, id, _body, c) => disburseLoan(deps, user, id, c.req.header("If-Match")) },
     recordRepayment: { schema: repaymentSchema, run: (deps, user, id, body) => recordLoanRepayment(deps, user, id, body.amount, body.allow_duplicate === true) },
   },

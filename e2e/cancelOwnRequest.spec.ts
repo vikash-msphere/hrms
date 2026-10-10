@@ -208,6 +208,63 @@ test("a pending request is withdrawn from every page that lets its own filer can
   await purge(employee, loanPath);
 });
 
+// An APPROVED request the filer no longer needs is still theirs to call off until the approval is acted on
+// (the day begins, the money is paid): it stays on their Requests tab, Cancel and all. Remote work is the
+// date-gated shape, overtime the payout-gated one - far in the future, because a run only pays overtime up to
+// its period end, where an approved reimbursement could be paid out by another spec's run mid-test.
+test("an approved request is withdrawn from the Requests tab while it can still be called off", async ({ as }) => {
+  test.setTimeout(120_000);
+  const employee = await as("employee");
+  const hr = await as("hr");
+  allowConsoleErrors(employee, /status of 503|status of 409/i);
+  const stamp = Date.now();
+  // Its own days, in a year the other cancel test does not hand out, for the reason given there.
+  const day = (offset: number) => {
+    const d = new Date(Date.UTC(2032, 0, 1 + ((stamp + offset * 317) % 900)));
+    return { iso: d.toISOString().slice(0, 10), rendered: d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" }) };
+  };
+  const remoteDay = day(0);
+  const overtimeDay = day(1);
+  const dateMatch = (rendered: string) => new RegExp(rendered.replace(/\s+/g, "\\s+"));
+
+  const kinds: { collection: string; route: string; heading: string; body: Record<string, unknown>; match: RegExp }[] = [
+    {
+      collection: "remote-work-requests", route: "remote-work", heading: "Remote work",
+      body: { start_date: remoteDay.iso, end_date: remoteDay.iso, reason: `E2E cancel approved remote ${stamp}` },
+      match: dateMatch(remoteDay.rendered),
+    },
+    {
+      collection: "overtime-requests", route: "overtime", heading: "Overtime",
+      body: { start_time: `${overtimeDay.iso}T13:00:00.000Z`, end_time: `${overtimeDay.iso}T15:00:00.000Z`, reason: `E2E cancel approved overtime ${stamp}` },
+      match: dateMatch(overtimeDay.rendered),
+    },
+  ];
+
+  for (const kind of kinds) {
+    const made = await employee.request.post(`/v1/${kind.collection}`, { headers: SPA_HEADERS, data: kind.body });
+    expect(made.status(), await made.text()).toBe(200);
+    const path = ((await made.json()) as { path: string }).path;
+    const approved = await hr.request.post(`/v1/${path}:approve`, { headers: SPA_HEADERS, data: {} });
+    expect(approved.status(), await approved.text()).toBe(200);
+
+    await gotoRoute(employee, kind.route, kind.heading);
+    const row = employee.locator("tbody tr").filter({ hasText: "Approved" }).filter({ hasText: kind.match }).first();
+    await expect(row, `${kind.collection}: the approved request is not on the Requests tab`).toBeVisible({ timeout: 30_000 });
+    await row.getByRole("button", { name: "Cancel", exact: true }).click();
+    const confirm = employee.getByRole("dialog");
+    await expect(confirm.getByText("Cancel this request?")).toBeVisible({ timeout: 30_000 });
+    await confirm.getByRole("button", { name: "Cancel request", exact: true }).click();
+    await expect(employee.getByRole("dialog")).toHaveCount(0, { timeout: 30_000 });
+    await expect
+      .poll(async () => {
+        const r = await employee.request.get(`/v1/${path}`);
+        return r.ok() ? ((await r.json()) as { state?: string }).state : "unreadable";
+      }, { timeout: 30_000, message: `${kind.collection} after cancelling the approval` })
+      .toBe("CANCELLED");
+    await purge(employee, path);
+  }
+});
+
 /** A category with no serial requirement - `assetRequests.spec.ts` keeps the same rule for the same reason. */
 async function assetCategory(page: import("@playwright/test").Page): Promise<{ path: string; created: boolean }> {
   const existing = await page.request.get("/v1/asset-categories?page_size=100");

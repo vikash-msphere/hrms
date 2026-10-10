@@ -20,7 +20,7 @@ import { RowActivityButton } from "@/components/common/RowActivityButton";
 import { withNewBadge } from "@/components/common/NewBadge";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import type { TableInsight } from "@/components/common/TableInsights";
-import { metaColumns } from "@/components/common/metaColumns";
+import { decisionNoteColumn, metaColumns } from "@/components/common/metaColumns";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
 import { TruncationNotice } from "@/components/common/TruncationNotice";
@@ -38,8 +38,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
-import { useConfirm } from "@/components/common/confirm";
-import { confirmDecision } from "@/lib/confirmDecision";
+import { useAskReason, useConfirm } from "@/components/common/confirm";
+import { askDecision } from "@/lib/confirmDecision";
 import { getSetting } from "@/lib/settingsStore";
 
 const upper = (s?: string) => (s ?? "").toUpperCase();
@@ -70,6 +70,7 @@ export default function Reimbursements({ me }: { me: Me }) {
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { toast } = useToast();
   const confirm = useConfirm();
+  const askReason = useAskReason();
   const { org } = useOrg();
   const money = (n: number) => formatMoney(n, org.default_currency, currencyDecimals(undefined, org));
   const canDecide = usePermission("reimbursements.approve");
@@ -118,6 +119,9 @@ export default function Reimbursements({ me }: { me: Me }) {
   // `useCallback` so the memos below depend on the predicate itself rather than restating the field it reads.
   const isOwn = useCallback((r: Reimbursement) => !!(r.employee && me.employee_id && idOf(r.employee) === me.employee_id), [me.employee_id]);
   const isPending = (r: Reimbursement) => upper(r.state) === "PENDING";
+  // Still the claimant's to withdraw: pending, or approved and not paid yet (APPROVED is the unpaid state) -
+  // unless approval set it against an advance, which it has already partly discharged. The server's line.
+  const isCancellable = (r: Reimbursement) => isPending(r) || (upper(r.state) === "APPROVED" && !((r.advance_settled ?? 0) > 0.005));
 
   const myAll = useMemo(() => rows.filter(isOwn), [rows, isOwn]);
   const pending = myAll.filter(isPending);
@@ -191,9 +195,10 @@ export default function Reimbursements({ me }: { me: Me }) {
 
   async function action(r: Reimbursement, verb: "approve" | "reject" | "cancel" | "pay") {
     const done = { approve: "Claim approved", reject: "Claim rejected", cancel: "Claim cancelled", pay: "Claim marked paid" };
-    if (!(await confirmDecision(confirm, verb, `${empName(r.employee)}'s ${money(r.amount ?? 0)} claim`))) return;
+    const body = await askDecision({ confirm, askReason }, verb, `${empName(r.employee)}'s ${money(r.amount ?? 0)} claim`);
+    if (body === null) return;
     try {
-      await invoke("reimbursements/" + idOf(r.path), verb, r.etag);
+      await invoke("reimbursements/" + idOf(r.path), verb, r.etag, body);
       toast({ title: done[verb], variant: "success" });
       reload();
     } catch (e) {
@@ -304,7 +309,7 @@ export default function Reimbursements({ me }: { me: Me }) {
         {isPending(r) && (
           <Button size="sm" variant="ghost" onClick={() => pickReceipt(r)}><Paperclip className="h-4 w-4" /> {r.has_receipt ? "Replace" : "Receipt"}</Button>
         )}
-        {isPending(r) && (
+        {isCancellable(r) && (
           <AccessAction collection="reimbursements" objectPath={r.path} verb="cancel" can={r.access?.can} label="Cancel">
             <Button size="sm" variant="ghost" onClick={() => action(r, "cancel")}><Ban className="h-4 w-4" /> Cancel</Button>
           </AccessAction>
@@ -327,9 +332,10 @@ export default function Reimbursements({ me }: { me: Me }) {
   const activityCol: Column<Reimbursement> = { id: "activity", header: "", sortable: false, filter: "none", align: "right", cell: (r) => <RowActivityButton resource={r.path} /> };
   const mineCols = [...baseCols, waitingCol, turnaroundCol, ...metaColumns<Reimbursement>(), ownActions];
   // Approvers see everyone's decided claims in History (with the employee), plus a Mark-paid action in separate mode.
+  const noteCol = decisionNoteColumn<Reimbursement>();
   const historyCols = withNewBadge(canDecide
-    ? [empCol, ...baseCols, waitingCol, turnaroundCol, dupeCol, ...metaColumns<Reimbursement>(), payCol, activityCol]
-    : [...baseCols, waitingCol, turnaroundCol, ...metaColumns<Reimbursement>(), activityCol]);
+    ? [empCol, ...baseCols, waitingCol, turnaroundCol, dupeCol, noteCol, ...metaColumns<Reimbursement>(), payCol, activityCol]
+    : [...baseCols, waitingCol, turnaroundCol, noteCol, ...metaColumns<Reimbursement>(), activityCol]);
 
   // What an approver should know before starting to click. Both are about the SET, not about any row: one
   // claim that has waited nine days looks exactly like one filed this morning, and a repeat is only visible
@@ -428,9 +434,11 @@ export default function Reimbursements({ me }: { me: Me }) {
         meEmployeeId={me.employee_id}
         canDecide={canDecide}
         accessLabel="Reimbursements"
+        isLive={isCancellable}
+        isPendingDecision={isPending}
         render={(items, mode, search) =>
           mode === "requests"
-            ? renderTable(search, items, mineCols, "reimb-active", "No pending claims", "Your pending claims (which you can still cancel) appear here. File a claim to get started.")
+            ? renderTable(search, items, mineCols, "reimb-active", "No open claims", "Your open claims - pending, or approved and not paid yet - appear here, and you can still cancel them. File a claim to get started.")
             : renderTable(search, items, historyCols, "reimb-history", "No decided claims", "Approved, paid, rejected, or cancelled claims appear here.")
         }
       />

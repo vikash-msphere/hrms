@@ -30,3 +30,14 @@ export function metaColumns<T extends AepResource>(): Column<T>[] {
     },
   ];
 }
+
+// The decider's note on a request's history: WHY it landed where it did. Every request rejection carries one
+// (the reason is required), so this is the column a requester reads to learn what to change before filing again.
+export function decisionNoteColumn<T extends { decision_note?: string }>(): Column<T> {
+  return {
+    id: "decision_note",
+    header: "Decision note",
+    accessor: (r) => r.decision_note ?? "",
+    cell: (r) => r.decision_note || "-",
+  };
+}

@@ -9,6 +9,7 @@ import {
 import { putAttachment, downloadAttachment, attachedObjectIds, attachmentDisposition } from "../services/attachments";
 import { requireCappedBody } from "../services/documentsCommon";
 import { toLeaveRequestResource } from "../http/serialize";
+import { rejectBody, type RejectBody } from "../http/rejectBody";
 
 const COL = "leave-requests";
 const DOCUMENT = "document"; // the attachment slot for a supporting file (sick note, travel document, …)
@@ -54,7 +55,7 @@ export const leaveRequests = collectionRoutes<LeaveRequestInput, typeof schema.l
     ),
   verbs: {
     approve: { run: (deps, user, id, _body, c) => approveLeaveRequest(deps, user, id, c.req.header("If-Match")) },
-    reject: { run: (deps, user, id, _body, c) => rejectLeaveRequest(deps, user, id, c.req.header("If-Match")) },
+    reject: { schema: rejectBody, run: (deps, user, id, body: RejectBody, c) => rejectLeaveRequest(deps, user, id, body.reason, c.req.header("If-Match")) },
     cancel: { run: (deps, user, id) => cancelLeaveRequest(deps, user, id) },
     // A supporting document (sick note, travel paperwork) goes up as raw bytes against the request that needs
     // it; the answer is the request itself, now flagged as documented. Same slot shape as a claim's receipt.

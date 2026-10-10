@@ -93,7 +93,7 @@ describe("verifying a tax declaration is pinned to the version that was read", (
     const { id, actor, employee } = await seed();
     const stale = etagOf(+new Date((await read(id)).updatedAt));
     await updateTaxDeclaration(deps, employee, id, { declared_amount: 60_000 });
-    await expect(rejectTaxDeclaration(deps, actor, id, stale)).rejects.toThrow();
+    await expect(rejectTaxDeclaration(deps, actor, id, "No proof attached", stale)).rejects.toThrow();
     expect((await read(id)).status).toBe("DECLARED");
   });
 

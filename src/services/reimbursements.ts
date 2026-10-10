@@ -18,7 +18,7 @@ import { outstandingOf } from "../domain/loans";
 import { repaidCreditStmt } from "./loans";
 import { runBatch, runBatchChecked } from "../lib/dbBatch";
 import { genId } from "../lib/idCodec";
-import { assertNotSubject, assertReviewedVersion } from "./decisionGuard";
+import { assertNotSubject, assertReviewedVersion, requireRejectReason } from "./decisionGuard";
 
 export type ReimbursementInput = {
   employee?: string | null;
@@ -105,12 +105,28 @@ async function resolveAdvance(deps: Deps, path: string | null | undefined, emplo
   return advanceId;
 }
 
-async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "REJECTED" | "CANCELLED", ifMatch?: string) {
+async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "REJECTED" | "CANCELLED", ifMatch?: string, reason?: string) {
   const row = await getReimbursement(deps, actor, id);
   // Who may approve/reject/cancel is enforced centrally by the verb's grant (middleware). Here the claim must
   // still be pending, be the version the decider read, and - to approve - not be the decider's own.
-  if (row.state !== "PENDING") {
-    throw failedPrecondition(to === "CANCELLED" ? "only pending claims can be cancelled" : "claim is not pending");
+  //
+  // Cancel also withdraws an APPROVED claim the person no longer wants paid. APPROVED is the unpaid state (a run
+  // or a settlement moves it to PAID), so the guarded flip below is also the guard against payout. A claim set
+  // against an advance is not withdrawn here: approving it already discharged part of the advance. A claim an
+  // approved company expense created is that expense's payout, so withdrawing it withdraws the expense too -
+  // expenses.ts#cancelExpense does both halves in one batch.
+  const stuck = to === "CANCELLED" ? "only pending or unpaid approved claims can be cancelled" : "claim is not pending";
+  if (to === "CANCELLED" && row.state === "APPROVED") {
+    if (row.advanceSettled > 0.005) throw failedPrecondition("this claim was set against your advance when it was approved, so it cannot be cancelled");
+    const bridged = (await deps.db.select({ uuid: schema.expenses.uuid }).from(schema.expenses).where(eq(schema.expenses.reimbursementId, id)).limit(1))[0];
+    if (bridged) {
+      // Imported here, not at the top: expenses.ts imports this module for the bridge itself.
+      const { cancelExpense } = await import("./expenses");
+      await cancelExpense(deps, actor, bridged.uuid);
+      return getReimbursement(deps, actor, id);
+    }
+  } else if (row.state !== "PENDING") {
+    throw failedPrecondition(stuck);
   }
   assertReviewedVersion(row, ifMatch);
   if (to === "APPROVED") await assertNotSubject(deps, actor, row.employeeId, "approve", "reimbursement claim");
@@ -187,23 +203,25 @@ async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "
     }
   }
 
-  // Guard the flip on PENDING so the decision is EXACTLY-ONCE (0 rows = already decided by a concurrent call).
+  // Guard the flip on the state just validated so the decision is EXACTLY-ONCE (0 rows = already decided, or
+  // paid, by a concurrent call).
+  const from = row.state;
   const [updated] = await deps.db
     .update(schema.reimbursements)
-    .set({ state: to, decidedBy: actor.uuid, updatedAt: at })
-    .where(and(eq(schema.reimbursements.uuid, id), eq(schema.reimbursements.state, "PENDING")))
+    .set({ state: to, decidedBy: actor.uuid, decisionNote: reason ?? null, updatedAt: at })
+    .where(and(eq(schema.reimbursements.uuid, id), eq(schema.reimbursements.state, from), isNull(schema.reimbursements.paidRunId)))
     .returning();
-  if (!updated) throw failedPrecondition(to === "CANCELLED" ? "only pending claims can be cancelled" : "claim is not pending");
-  await audit(deps, actor, `reimbursement.${to.toLowerCase()}`, "reimbursements", id, stateMeta(row.state, to, { employee: `employees/${row.employeeId}` }), updated);
+  if (!updated) throw failedPrecondition(stuck);
+  await audit(deps, actor, `reimbursement.${to.toLowerCase()}`, "reimbursements", id, stateMeta(from, to, { employee: `employees/${row.employeeId}`, ...(reason ? { reason } : {}) }), updated);
   if (to === "APPROVED" || to === "REJECTED") {
-    await notify(deps, { recipient: row.employeeId, type: `reimbursement.${to.toLowerCase()}`, title: `Reimbursement ${to.toLowerCase()}`, body: `Your reimbursement claim was ${to.toLowerCase()}.`, link: "reimbursements/history", subject: `reimbursements/${id}`, actorId: actor.employeeId });
+    await notify(deps, { recipient: row.employeeId, type: `reimbursement.${to.toLowerCase()}`, title: `Reimbursement ${to.toLowerCase()}`, body: reason ? `Your reimbursement claim was rejected: ${reason}` : `Your reimbursement claim was ${to.toLowerCase()}.`, link: "reimbursements/history", subject: `reimbursements/${id}`, actorId: actor.employeeId });
     await emitEvent(deps, actor, `reimbursement.${to.toLowerCase()}`, { subject: `reimbursements/${id}`, employeeId: row.employeeId, payload: { amount: row.amount } });
   }
   return updated;
 }
 
 export const approveReimbursement = (deps: Deps, actor: AppUser, id: string, ifMatch?: string) => decide(deps, actor, id, "APPROVED", ifMatch);
-export const rejectReimbursement = (deps: Deps, actor: AppUser, id: string, ifMatch?: string) => decide(deps, actor, id, "REJECTED", ifMatch);
+export const rejectReimbursement = async (deps: Deps, actor: AppUser, id: string, reason: string, ifMatch?: string) => decide(deps, actor, id, "REJECTED", ifMatch, requireRejectReason(reason));
 export const cancelReimbursement = (deps: Deps, actor: AppUser, id: string) => decide(deps, actor, id, "CANCELLED");
 
 // ---- Expense bridge -------------------------------------------------------------------------------------

@@ -10,6 +10,7 @@ import {
   type OvertimeInput,
 } from "../services/overtimeRequests";
 import { toOvertimeRequestResource } from "../http/serialize";
+import { rejectBody, type RejectBody } from "../http/rejectBody";
 
 const createSchema = z
   .object({
@@ -20,7 +21,7 @@ const createSchema = z
   })
   .strict();
 
-// The approver's optional note is taken as sent, exactly as the hand-written route did.
+// The approver's optional note on an approval, taken as sent. A rejection's reason is required (http/rejectBody.ts).
 const noteOf = async (c: Context<AppEnv>) => (await jsonBody<{ note?: string }>(c)).note;
 
 // Overtime requests. The create prices the hours and a decision either queues the payout or closes the request,
@@ -44,7 +45,7 @@ export const overtimeRequests = collectionRoutes<OvertimeInput, typeof schema.ov
   },
   verbs: {
     approve: { run: async (deps, user, id, _body, c) => approveOvertimeRequest(deps, user, id, await noteOf(c), c.req.header("If-Match")) },
-    reject: { run: async (deps, user, id, _body, c) => rejectOvertimeRequest(deps, user, id, await noteOf(c), c.req.header("If-Match")) },
+    reject: { schema: rejectBody, run: (deps, user, id, body: RejectBody, c) => rejectOvertimeRequest(deps, user, id, body.reason, c.req.header("If-Match")) },
     cancel: { run: (deps, user, id) => cancelOvertimeRequest(deps, user, id) },
   },
 });

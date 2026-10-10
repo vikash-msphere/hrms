@@ -26,12 +26,17 @@ test.describe("loan requests: rejected and cancelled", () => {
       // refuses one outright now and again (a 503 in tens of milliseconds, tmp/e2e-worker.log - the local D1
       // Durable Object's queue, see fixtures.ts) - which is a decision that did not happen, not a decision
       // the app got wrong. A toast lives ~5s and is missed under load anyway.
+      // Rejecting asks why, and the reason is what the borrower then reads on the card.
       await expect(async () => {
         if (await rejected(payroll, loan.path)) return;
         await card.getByRole("button", { name: "Reject", exact: true }).click({ timeout: 10_000 });
+        const ask = payroll.getByRole("dialog").filter({ hasText: "Reject this request?" });
+        await ask.getByRole("textbox", { name: "Reason", exact: true }).fill(WHY, { timeout: 10_000 });
+        await ask.getByRole("button", { name: "Reject", exact: true }).click({ timeout: 10_000 });
         await expect.poll(() => rejected(payroll, loan.path), { timeout: 10_000 }).toBe(true);
       }).toPass({ timeout: 45_000 });
       await expect(card).toContainText(/Rejected/i, { timeout: 30_000 });
+      await expect(card).toContainText(WHY);
 
       // Rejected is terminal: neither of the two decisions, nor disbursal, is offered any more.
       await expect(card.getByRole("button", { name: "Approve", exact: true })).toHaveCount(0);
@@ -78,6 +83,8 @@ test.describe("loan requests: rejected and cancelled", () => {
     }
   });
 });
+
+const WHY = "Over the advance limit for your grade";
 
 /** Whether the loan really is rejected - asked of the record, not of the toast that announced it. */
 async function rejected(page: import("@playwright/test").Page, path: string): Promise<boolean> {

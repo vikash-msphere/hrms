@@ -22,7 +22,7 @@ import { RowActivityButton } from "@/components/common/RowActivityButton";
 import { withNewBadge } from "@/components/common/NewBadge";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import type { TableInsight } from "@/components/common/TableInsights";
-import { metaColumns } from "@/components/common/metaColumns";
+import { decisionNoteColumn, metaColumns } from "@/components/common/metaColumns";
 import { Field } from "@/components/common/Field";
 import { WriteDialog } from "@/components/common/WriteDialog";
 import { TimeRangeField, fmtDuration } from "@/components/common/TimeRangeField";
@@ -35,11 +35,15 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Combobox } from "@/components/ui/combobox";
 import { useToast } from "@/components/ui/use-toast";
-import { useConfirm } from "@/components/common/confirm";
-import { confirmDecision } from "@/lib/confirmDecision";
+import { useAskReason, useConfirm } from "@/components/common/confirm";
+import { askDecision } from "@/lib/confirmDecision";
 
 const pad = (n: number) => String(n).padStart(2, "0");
 const upper = (s?: string) => (s ?? "").toUpperCase();
+// Still the requester's to call off: pending, or approved and not yet paid by a run or an exit settlement (the
+// server's line). These are the caller's live requests; everything else is history.
+const isPending = (r: OvertimeRequest) => upper(r.state) === "PENDING";
+const isCancellable = (r: OvertimeRequest) => isPending(r) || (upper(r.state) === "APPROVED" && !r.paid);
 // A month's overtime past which somebody should be asked about, rather than approved. Twenty hours: half a
 // normal working week on top of a normal working month.
 const HEAVY_MONTH_MINUTES = 20 * 60;
@@ -68,6 +72,7 @@ export default function Overtime({ me }: { me: Me }) {
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { toast } = useToast();
   const confirm = useConfirm();
+  const askReason = useAskReason();
   const guardClose = useDiscardGuard();
   const sched = useClock().sched; // org shift end + timezone, for reading overtime off the punch log
   const canCreate = usePermission("overtime-requests.write");
@@ -205,9 +210,10 @@ export default function Overtime({ me }: { me: Me }) {
   }
 
   async function action(r: OvertimeRequest, verb: "approve" | "reject" | "cancel") {
-    if (!(await confirmDecision(confirm, verb, `${empName(r.employee)}'s overtime on ${formatDate(orgYmd(r.start_time))}`))) return;
+    const body = await askDecision({ confirm, askReason }, verb, `${empName(r.employee)}'s overtime on ${formatDate(orgYmd(r.start_time))}`);
+    if (body === null) return;
     try {
-      await invoke("overtime-requests/" + idOf(r.path), verb, r.etag);
+      await invoke("overtime-requests/" + idOf(r.path), verb, r.etag, body);
       toast({ title: `Request ${verb === "cancel" ? "cancelled" : verb === "approve" ? "approved" : "rejected"}`, variant: "success" });
       reload();
     } catch (e) {
@@ -252,16 +258,13 @@ export default function Overtime({ me }: { me: Me }) {
     },
   ];
   // History only: the approver's note explains WHY a request landed where it did (esp. rejections).
-  const noteCol: Column<OvertimeRequest> = {
-    id: "decision_note", header: "Decision note", accessor: (r) => r.decision_note ?? "",
-    cell: (r) => r.decision_note || <span className="text-muted-foreground">-</span>,
-  };
-  // Requests tab is the caller's own pending overtime - cancellable. Approve/reject live in the Approvals inbox.
+  const noteCol = decisionNoteColumn<OvertimeRequest>();
+  // Requests tab is the caller's own live overtime - cancellable. Approve/reject live in the Approvals inbox.
   const cancelCol: Column<OvertimeRequest> = {
     id: "actions", header: "", sortable: false, filter: "none", align: "right",
     cell: (r) => (
       <div className="flex items-center justify-end gap-1">
-        {upper(r.state) === "PENDING" && (
+        {isCancellable(r) && (
           <AccessAction collection="overtime-requests" objectPath={r.path} verb="cancel" can={r.access?.can} label="Cancel">
             <Button size="sm" variant="ghost" onClick={() => action(r, "cancel")}><Ban className="h-4 w-4" /> Cancel</Button>
           </AccessAction>
@@ -374,6 +377,8 @@ export default function Overtime({ me }: { me: Me }) {
         meEmployeeId={me.employee_id}
         canDecide={canDecide}
         accessLabel="Overtime requests"
+        isLive={isCancellable}
+        isPendingDecision={isPending}
         render={(items, mode, search) =>
           mode === "requests"
             ? renderTable(search, items, requestsCols, "ot-active", "No active overtime")

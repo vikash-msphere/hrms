@@ -23,8 +23,9 @@ const DECISION = [
 // a `)`-terminated scan silently matched none of them - which made an earlier version of this gate pass while
 // finding nothing at all.
 const CALL = new RegExp(String.raw`invoke\([^\n]*?["'](${DECISION.join("|")})["']`, "g");
-// What counts as having asked: the shared helper, a direct confirm, or a note that a dialog already did it.
-const ASKED = /confirmDecision\(|\bconfirm\(\{|await confirm\(|already confirmed|its own dialog|confirmation upstream/;
+// What counts as having asked: the shared helpers (a reject asks for its reason through askDecision /
+// askRejectReason / askBulkRejectReason), a direct confirm, or a note that a dialog already did it.
+const ASKED = /confirmDecision\(|askDecision\(|askRejectReason\(|askBulkRejectReason\(|\bconfirm\(\{|await confirm\(|already confirmed|its own dialog|confirmation upstream/;
 
 // path suffix -> reason. An entry here is a claim that the action is confirmed some other way.
 const ALLOW: Record<string, string> = {
@@ -59,6 +60,18 @@ describe("consequential actions ask first", () => {
       }
     }
     expect(misses, `decision verbs fired with no confirmation: ${misses.join(", ")}`).toEqual([]);
+  });
+
+  // A request `:reject` without a reason is refused by the server (http/rejectBody.ts), so a call site that
+  // forgets it is a button that always fails. The verb-as-variable sites go through askDecision, which builds
+  // the body; this pins the literal ones.
+  it("every literal reject sends a reason", () => {
+    const misses: string[] = [];
+    const REJECT = /invoke\([^\n]*?["']reject["'][^\n]*/g;
+    for (const [path, src] of Object.entries(web)) {
+      for (const m of src.matchAll(REJECT)) if (!/\breason\b/.test(m[0])) misses.push(path.replace("../", ""));
+    }
+    expect(misses, `reject sent with no reason: ${misses.join(", ")}`).toEqual([]);
   });
 
   it("the allowlist has no dead entries", () => {

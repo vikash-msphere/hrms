@@ -30,7 +30,7 @@ const dayMs = (s?: string | null) => (s ? Date.parse(s + "T00:00:00Z") : NaN);
 import { round2 } from "../domain/money";
 import { runBatchChecked, type BatchStmt, type CheckedStmt } from "../lib/dbBatch";
 import { atVersion, checkEtag, updateAtVersion } from "./versionGuard";
-import { assertNotSubject, assertReviewedVersion } from "./decisionGuard";
+import { assertNotSubject, assertReviewedVersion, requireRejectReason } from "./decisionGuard";
 const MANUAL_REPAY_DEDUP_MS = 60_000; // an identical manual repayment within 60s = accidental double-submit
 
 export async function listLoans(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, employee?: string, status?: string, showDeleted = false, deletedOnly = false) {
@@ -130,14 +130,15 @@ export async function approveLoan(deps: Deps, actor: AppUser, id: string, ifMatc
   await emitEvent(deps, actor, "loan.approved", { subject: `loans/${id}`, employeeId: row.employeeId, payload: { amount: row.principal, emiAmount: monthly, installments: row.installments } });
   return updated;
 }
-export async function rejectLoan(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
+export async function rejectLoan(deps: Deps, actor: AppUser, id: string, rawReason: string, ifMatch?: string) {
+  const reason = requireRejectReason(rawReason);
   const row = await load(deps, id);
   if (row.status !== "PENDING") throw failedPrecondition("only a pending loan can be rejected");
   assertReviewedVersion(row, ifMatch);
-  const updated = await setStatus(deps, id, { status: "REJECTED", decidedBy: actor.uuid }, "PENDING");
+  const updated = await setStatus(deps, id, { status: "REJECTED", decidedBy: actor.uuid, decisionNote: reason }, "PENDING");
   if (!updated) throw failedPrecondition("only a pending loan can be rejected");
-  await audit(deps, actor, "loan.reject", "loans", id, stateMeta(row.status, "REJECTED", { employee: `employees/${row.employeeId}` }), updated);
-  await notify(deps, { recipient: row.employeeId, type: "loan.rejected", title: `${row.kind === "advance" ? "Advance" : "Loan"} rejected`, body: `Your ${row.kind} request was rejected.`, link: "loans", actorId: actor.employeeId });
+  await audit(deps, actor, "loan.reject", "loans", id, stateMeta(row.status, "REJECTED", { employee: `employees/${row.employeeId}`, reason }), updated);
+  await notify(deps, { recipient: row.employeeId, type: "loan.rejected", title: `${row.kind === "advance" ? "Advance" : "Loan"} rejected`, body: `Your ${row.kind} request was rejected: ${reason}`, link: "loans", actorId: actor.employeeId });
   await emitEvent(deps, actor, "loan.rejected", { subject: `loans/${id}`, employeeId: row.employeeId, payload: { amount: row.principal } });
   return updated;
 }

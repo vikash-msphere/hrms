@@ -48,6 +48,7 @@ test("a submitted entry is rejected from the manager's queue, and leaves it", as
     const ask = manager.getByRole("dialog").filter({ hasText: "Reject this request?" });
     await expect(ask).toBeVisible({ timeout: 30_000 });
     await expect(ask.getByText(/would have to file again/)).toBeVisible();
+    await ask.getByRole("textbox", { name: "Reason", exact: true }).fill("Book these hours to the support project");
     await ask.getByRole("button", { name: "Reject", exact: true }).click();
 
     // Rejected on the server, and off the queue in the page: an entry that stays after the decision is how a

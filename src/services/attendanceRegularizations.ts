@@ -15,7 +15,7 @@ import { DEFAULT_ATTENDANCE, type AttendanceConfig, localDay } from "../domain/a
 import { invalidArgument, notFound, failedPrecondition } from "../lib/errors";
 import { keysetPage } from "./keysetPage";
 import { restateLopForDay } from "./payroll";
-import { assertNotSubject, assertReviewedVersion } from "./decisionGuard";
+import { assertNotSubject, assertReviewedVersion, requireRejectReason } from "./decisionGuard";
 
 // Attendance regularization requests: an employee asks to correct a whole day's clock times, submitting the
 // COMPLETE intended set of in/out pairs for the day. A manager (own dept) or HR approves; on approval the
@@ -186,7 +186,7 @@ async function planApproval(deps: Deps, row: Regularization): Promise<Correction
   return { supersede: before.map((s) => s.uuid), sessions };
 }
 
-async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "REJECTED" | "CANCELLED", ifMatch?: string) {
+async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "REJECTED" | "CANCELLED", ifMatch?: string, reason?: string) {
   const row = await getRegularization(deps, actor, id);
   // Who may approve/reject/cancel is gated by the verb's grant (middleware). Here: state, the version the
   // decider read, and - to approve - that it is not their own, since approval rewrites the day's punches and
@@ -200,7 +200,7 @@ async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "
   // supersede the day's punches + insert the correction sessions twice (0 rows = already decided).
   const [updated] = await deps.db
     .update(schema.attendanceRegularizations)
-    .set({ state: to, decidedBy: actor.uuid, updatedAt: new Date() })
+    .set({ state: to, decidedBy: actor.uuid, decisionNote: reason ?? null, updatedAt: new Date() })
     .where(and(eq(schema.attendanceRegularizations.uuid, id), eq(schema.attendanceRegularizations.state, "PENDING")))
     .returning();
   if (!updated) throw failedPrecondition(to === "CANCELLED" ? "only pending requests can be cancelled" : "request is not pending");
@@ -228,9 +228,9 @@ async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "
     }
   }
   const verb = to === "APPROVED" ? "approve" : to === "REJECTED" ? "reject" : "cancel";
-  await audit(deps, actor, `attendance-regularization.${verb}`, "attendance-regularizations", id, { employee: `employees/${row.employeeId}`, date: new Date(row.date).toISOString().slice(0, 10) });
+  await audit(deps, actor, `attendance-regularization.${verb}`, "attendance-regularizations", id, { employee: `employees/${row.employeeId}`, date: new Date(row.date).toISOString().slice(0, 10), ...(reason ? { reason } : {}) });
   if (to === "APPROVED" || to === "REJECTED") {
-    await notify(deps, { recipient: row.employeeId, type: `regularization.${to.toLowerCase()}`, title: `Regularization ${to.toLowerCase()}`, body: `Your attendance regularization was ${to.toLowerCase()}.`, link: "attendance", subject: `attendance-regularizations/${id}`, actorId: actor.employeeId });
+    await notify(deps, { recipient: row.employeeId, type: `regularization.${to.toLowerCase()}`, title: `Regularization ${to.toLowerCase()}`, body: reason ? `Your attendance regularization was rejected: ${reason}` : `Your attendance regularization was ${to.toLowerCase()}.`, link: "attendance", subject: `attendance-regularizations/${id}`, actorId: actor.employeeId });
   }
   if (to === "APPROVED") await emitEvent(deps, actor, "attendanceRegularization.approved", { subject: `attendance-regularizations/${id}`, employeeId: row.employeeId, payload: { date: new Date(row.date).toISOString() } });
   // A regularization fixes the punches for one day, which can change that day's loss of pay. If the day sits
@@ -243,5 +243,5 @@ async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "
 }
 
 export const approveRegularization = (deps: Deps, actor: AppUser, id: string, ifMatch?: string) => decide(deps, actor, id, "APPROVED", ifMatch);
-export const rejectRegularization = (deps: Deps, actor: AppUser, id: string, ifMatch?: string) => decide(deps, actor, id, "REJECTED", ifMatch);
+export const rejectRegularization = async (deps: Deps, actor: AppUser, id: string, reason: string, ifMatch?: string) => decide(deps, actor, id, "REJECTED", ifMatch, requireRejectReason(reason));
 export const cancelRegularization = (deps: Deps, actor: AppUser, id: string) => decide(deps, actor, id, "CANCELLED");

@@ -3,11 +3,11 @@ import { SPA_HEADERS, allowConsoleErrors, fileLeave, gotoRoute, inDays, nextWeek
 // Saying no, on every kind of request that can be said no to.
 //
 // The approvals inbox drives a dozen collections through ONE row component, and the reject path is the half
-// that gets less use and therefore rots: it is a separate dialog (a one-click reject is exactly what nobody
-// wants), it carries a note back to the requester where the API takes one, and it has to work identically
-// whichever collection the row came from. `test/approvals*.test.ts` owns which rows appear. What only a
-// browser has is the decision itself: the dialog, the note, the row leaving the inbox, and the requester's
-// own page saying rejected afterwards.
+// that gets less use and therefore rots: it is a separate prompt (a one-click reject is exactly what nobody
+// wants), it will not go without a reason, which is stored on the request for the requester, and it has to
+// work identically whichever collection the row came from. `test/approvals*.test.ts` owns which rows appear.
+// What only a browser has is the decision itself: the prompt, the reason, the row leaving the inbox, and the
+// request saying rejected, and why, afterwards.
 //
 // One spec across several collections on purpose: the failure this protects against is in the shared row, so
 // covering one collection and trusting the rest is how the other eleven break quietly.
@@ -16,7 +16,7 @@ import { SPA_HEADERS, allowConsoleErrors, fileLeave, gotoRoute, inDays, nextWeek
 let ownProject: string | undefined;
 
 const KINDS: {
-  collection: string; label: string; tab: string; note: boolean;
+  collection: string; label: string; tab: string;
   // Who actually holds approve/reject on this collection - a manager for everything dept-owned (the default),
   // but reimbursements are HR's call and loans/advances are payroll's (grants.ts: "HR decides reimbursement
   // claims (no manager involvement)"; loans only ever reach payroll's `loans.**` allow).
@@ -30,7 +30,6 @@ const KINDS: {
     collection: "leave-requests",
     label: "leave",
     tab: "Leave",
-    note: false,
     // `fileLeave` already picks a day nobody else's spec is using and retries past overlap/collision errors -
     // exactly the risk that kept this one out of the table for a while.
     make: (page, mark) => fileLeave(page, `E2E leave to reject ${mark}`),
@@ -39,7 +38,6 @@ const KINDS: {
     collection: "overtime-requests",
     label: "overtime",
     tab: "Overtime",
-    note: true,
     make: async (page, mark) => {
       const res = await page.request.post("/v1/overtime-requests", {
         headers: SPA_HEADERS,
@@ -53,7 +51,6 @@ const KINDS: {
     collection: "remote-work-requests",
     label: "remote work",
     tab: "Remote work",
-    note: true,
     make: async (page, mark) => {
       const res = await page.request.post("/v1/remote-work-requests", {
         headers: SPA_HEADERS,
@@ -69,7 +66,6 @@ const KINDS: {
     collection: "attendance-regularizations",
     label: "attendance correction",
     tab: "Attendance",
-    note: false,
     make: async (page, mark) => {
       // Far enough back that no other spec's own day-picking scheme (`pendingCorrections.spec.ts`,
       // `regularizationReject.spec.ts`, the fixed `inDays(-40)` in `regularizationCancel.spec.ts`) ever lands
@@ -92,7 +88,6 @@ const KINDS: {
     collection: "asset-requests",
     label: "asset request",
     tab: "Asset requests",
-    note: true,
     make: async (page, mark) => {
       // No categories are seeded at all (every other asset spec takes one out on the same get-or-create,
       // `assetRequests.spec.ts`'s own `assetCategory()` helper) - the test body ensures one exists (as an
@@ -112,7 +107,6 @@ const KINDS: {
     collection: "expenses",
     label: "expense",
     tab: "Company expenses",
-    note: true,
     make: async (page, mark) => {
       // Office Supplies: seeded with no receipt required, so this is about the reject path, not the create
       // form's own (client-side only) receipt gate - `expenseDecisionsAndInvoice.spec.ts` owns that one.
@@ -135,7 +129,6 @@ const KINDS: {
     collection: "reimbursements",
     label: "reimbursement",
     tab: "Reimbursements",
-    note: false,
     decider: "hr",
     make: async (page, mark) => {
       // Created straight into PENDING - unlike expenses, reimbursements have no draft state to submit out of.
@@ -151,7 +144,6 @@ const KINDS: {
     collection: "loans",
     label: "advance",
     tab: "Loans & advances",
-    note: false,
     decider: "payroll",
     stateField: "status",
     make: async (page, mark) => {
@@ -167,7 +159,6 @@ const KINDS: {
     collection: "time-entries",
     label: "timesheet entry",
     tab: "Timesheets",
-    note: false,
     stateField: "status",
     make: async (page, mark) => {
       // This spec's OWN project, made up front. Never another spec's fixture: "the first active project" took
@@ -189,7 +180,7 @@ const KINDS: {
   },
 ];
 
-test("a request of each kind is rejected from the inbox, with the reason it takes", async ({ as }) => {
+test("a request of each kind is rejected from the inbox, and only with a reason", async ({ as }) => {
   test.setTimeout(240_000);
   const employee = await as("employee");
   const decidingManager = await as("manager");
@@ -247,33 +238,20 @@ test("a request of each kind is rejected from the inbox, with the reason it take
     // front of the reader - and this spec is about a dialog that says whose request is being refused.
     await expect(row, `${kind.collection}: the requester never resolved`).toContainText(/Eve Employee/, { timeout: 30_000 });
 
-    // Rejecting is never one click: the dialog names who and what, and takes the reason where the API relays
-    // one back to the requester.
+    // Rejecting is never one click: the prompt names who and what, and will not go until it has a reason -
+    // the button stays disabled on an empty box.
+    const why = `E2E: not this ${kind.label}, sorry.`;
     await row.getByRole("button", { name: "Reject" }).click();
     const dialog = manager.getByRole("dialog");
     await expect(dialog.getByText("Reject this request?")).toBeVisible({ timeout: 30_000 });
-    // The name is looked up, not carried on the row - the dialog asks the resource store who this request
-    // belongs to - so on a busy lane it arrives a moment after the dialog does.
     await expect(dialog.getByText(/Eve Employee/)).toBeVisible({ timeout: 30_000 });
-    if (kind.note) {
-      const note = dialog.getByRole("textbox");
-      await expect(note, `${kind.collection}: takes a note but offers no field`).toHaveCount(1);
-      await note.fill(`E2E: not this ${kind.label}, sorry.`);
-    }
-    // Re-pressed on a miss: a press that did not land (the request never completing) leaves this same dialog
-    // open, same as it started, under load. Bounded short: this dialog carries the etag it opened WITH, and a
-    // background refresh of this same row between opening it and the first press (or a genuine collision with
-    // the other browser the inbox is shared with) leaves every retry here 409-ing against that same stale
-    // snapshot forever - so this gives up quickly rather than spending the whole budget on a write that can
-    // never land, and escapes the dialog so the poll below reopens the row fresh, with a fresh etag.
-    await expect(async () => {
-      if (!(await manager.getByRole("dialog").count())) return;
-      const submit = manager.getByRole("dialog").getByRole("button", { name: "Reject request" });
-      if (await submit.count()) await submit.click();
-      await expect(manager.getByRole("dialog")).toHaveCount(0, { timeout: 5_000 });
-    }).toPass({ timeout: 10_000 }).catch(async () => {
-      if (await manager.getByRole("dialog").count()) await manager.keyboard.press("Escape");
-    });
+    const submit = dialog.getByRole("button", { name: "Reject", exact: true });
+    await expect(submit, `${kind.collection}: rejects with no reason`).toBeDisabled();
+    await dialog.getByRole("textbox", { name: "Reason", exact: true }).fill(why);
+    // The prompt closes on the press and the write follows it; a write that loses (a 409 from the other
+    // browser the inbox is shared with) toasts, and the poll below presses again on the still-pending row.
+    await submit.click();
+    await expect(manager.getByRole("dialog")).toHaveCount(0, { timeout: 10_000 });
 
 
     // The decision is the row's own: it leaves the inbox, and the request itself says rejected from cold.
@@ -283,7 +261,7 @@ test("a request of each kind is rejected from the inbox, with the reason it take
       .poll(async () => {
         const after = await manager.request.get(`/v1/${path}`);
         if (!after.ok()) return "unreadable";
-        const body = (await after.json()) as { state?: string; status?: string };
+        const body = (await after.json()) as { state?: string; status?: string; decision_note?: string };
         const state = kind.stateField === "status" ? body.status : body.state;
         if (state !== "REJECTED" && (await manager.getByRole("button", { name: "Reject" }).count())) {
           // Still pending: press again on the same row, which is what the conflict message asks for.
@@ -291,14 +269,17 @@ test("a request of each kind is rejected from the inbox, with the reason it take
           if (await again.count()) {
             await again.getByRole("button", { name: "Reject" }).click();
             const box = manager.getByRole("dialog");
-            if (await box.getByRole("button", { name: "Reject request" }).count()) {
-              await box.getByRole("button", { name: "Reject request" }).click();
+            const reason = box.getByRole("textbox", { name: "Reason", exact: true });
+            if (await reason.count()) {
+              await reason.fill(why);
+              await box.getByRole("button", { name: "Reject", exact: true }).click();
             }
           }
         }
-        return state;
+        // The reason travels with the decision: a rejected request says why.
+        return state === "REJECTED" ? `${state}: ${body.decision_note}` : state;
       }, { timeout: 60_000, message: `${kind.collection} after reject` })
-      .toBe("REJECTED");
+      .toBe(`REJECTED: ${why}`);
 
     await purge(manager, path);
   }

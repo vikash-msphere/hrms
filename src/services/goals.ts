@@ -878,12 +878,13 @@ async function emitConfidence(deps: Deps, actor: AppUser, from: string | null, r
   if (row.confidence !== "off_track" && row.confidence !== "at_risk") return;
   const mgr = await managerIdOf(deps, row.employeeId);
   // A goal turning at-risk is the single most useful thing a watcher can hear: whoever is waiting on it can
-  // re-plan while there is still time, which is the whole reason to watch somebody else's goal.
+  // re-plan while there is still time, which is the whole reason to watch somebody else's goal. The owner is
+  // not skipped: nothing here tells them directly, so an owner watching their own goal hears a manager flag it.
   await notifyGoalWatchers(deps, actor, row, {
     type: "goal.at_risk",
     title: row.confidence === "off_track" ? `Off track: ${row.title}` : `At risk: ${row.title}`,
     body: row.confidenceNote?.trim() ? row.confidenceNote.trim().slice(0, 160) : row.title,
-  }, [mgr, row.employeeId]);
+  }, [mgr]);
   if (!mgr || mgr === actor.employeeId) return;
   await notify(deps, {
     recipient: mgr,
@@ -1046,8 +1047,8 @@ export async function contributorsFor(deps: Deps, goalIds: string[]): Promise<Ma
 /**
  * Tell a goal's watchers something moved.
  *
- * Excludes the actor and anyone the event already told directly (the owner, their manager), so watching a goal
- * you are already in the loop on does not double every notification. Low priority: this is the "keep me
+ * Excludes the actor and anyone the event already told directly (`alreadyTold`: the owner a comment reached, the
+ * manager a completion reached), so watching a goal you are already in the loop on does not double a notification. Low priority: this is the "keep me
  * posted" channel, and it digests where the recipient has a digest.
  */
 async function notifyGoalWatchers(
@@ -1078,11 +1079,12 @@ async function notifyGoalWatchers(
 }
 
 /**
- * Watch / unwatch a goal: hear about somebody else's goal that your own plans turn on.
+ * Watch / unwatch a goal: hear about a goal your own plans turn on, or about other people moving your own.
  *
  * The cases are specific and were all silent: the owner of a goal BLOCKED BY this one, a contributor credited
- * with a share of it, a skip-level who cares. Idempotent both ways, unaudited (reading along is not a change
- * to the goal), and open to anyone who can read the goal, because the verb is authorized on the goal itself.
+ * with a share of it, a skip-level who cares, and the owner whose manager or contributors move or flag it.
+ * Idempotent both ways, unaudited (reading along is not a change to the goal), and open to anyone who can read
+ * the goal, because the verb is authorized on the goal itself.
  */
 export async function watchGoal(deps: Deps, actor: AppUser, id: string, on: boolean) {
   const row = (await deps.db.select({ uuid: schema.goals.uuid, del: schema.goals.deleteTime }).from(schema.goals).where(eq(schema.goals.uuid, id)).limit(1))[0];
@@ -1475,13 +1477,16 @@ export async function updateGoalProgress(deps: Deps, actor: AppUser, id: string,
   await audit(deps, actor, "goal.updateProgress", "goals", id, { from: row.progress, to: updated.progress, ...(note?.trim() ? { note: note.trim() } : {}) }, updated);
   await emitGoalProgress(deps, actor, updated);
   // Watchers hear a real move, not a re-save at the same number - and not a roll-up, which is the same news
-  // arriving from the key result they are already watching.
+  // arriving from the key result they are already watching. The owner is not skipped: a move nobody but the
+  // actor made reaches no one directly, so an owner watching their own goal hears a contributor or manager move
+  // it. The manager is skipped on completion, which `emitGoalProgress` already told them about.
   if (!fromRollup && updated.progress !== row.progress) {
+    const completed = updated.status === "completed" || updated.progress >= 100;
     await notifyGoalWatchers(deps, actor, updated, {
       type: "goal.progress",
       title: updated.status === "completed" ? `Completed: ${updated.title}` : `Progress on “${updated.title}”`,
       body: `${row.progress}% → ${updated.progress}%${note?.trim() ? ` - ${note.trim().slice(0, 140)}` : ""}`,
-    }, [updated.employeeId]);
+    }, [completed ? await managerIdOf(deps, updated.employeeId) : null]);
   }
   if (updated.kind === "key_result") await recomputeObjectiveProgress(deps, actor, updated.parentId);
   return updated;

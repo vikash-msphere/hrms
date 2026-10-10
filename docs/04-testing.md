@@ -264,7 +264,7 @@ suite, where it is cheaper and stricter, and is deliberately not re-asserted her
 | `letterheads` | the company page documents print on, designed against a live PDF preview of itself |
 | `personalDetails` | contact and emergency details kept by their owner (`OWN_PII`), as two cards on the Profile tab |
 | `timesheetApproval` | the far side of a submitted week: the manager's own page carries the queue, and a decision asks before it commits |
-| `rejection` | saying NO, across kinds: the reject dialog, the note the API relays, and the row leaving the inbox - one spec because it is one shared row |
+| `rejection` | saying NO, across kinds: the reject prompt that will not go without a reason, the reason stored on the request, and the row leaving the inbox - one spec because it is one shared row |
 | `loanLifecycle` | approve, disburse, record a repayment - each offered only in the state it belongs to, and the ledger moving |
 | `offerOutcome` | the endings an extended offer can have (accepted, declined) plus the offer letter as a real PDF |
 | `transitionTasks` | the onboarding checklist as work: ticked, put back, added to, and the process closed with a way back |

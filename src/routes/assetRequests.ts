@@ -10,6 +10,7 @@ import {
   type AssetRequestInput,
 } from "../services/assetRequests";
 import { toAssetRequestResource } from "../http/serialize";
+import { rejectBody, type RejectBody } from "../http/rejectBody";
 
 const createSchema = z
   .object({
@@ -23,7 +24,7 @@ const createSchema = z
 // `:issue` names the asset being handed over (the inbound edge decodes the ref).
 const issueSchema = z.object({ asset: z.string() }).strict();
 
-// The approver's optional note is taken as sent, like the other request collections.
+// The approver's optional note on an approval, taken as sent. A rejection's reason is required (http/rejectBody.ts).
 const noteOf = async (c: Context<AppEnv>) => (await jsonBody<{ note?: string }>(c)).note;
 
 // Requests for kit. Filed, then approved, rejected or cancelled - never edited or deleted, and the table has no
@@ -49,7 +50,7 @@ export const assetRequests = collectionRoutes<AssetRequestInput, typeof schema.a
   },
   verbs: {
     approve: { run: async (deps, user, id, _body, c) => approveAssetRequest(deps, user, id, await noteOf(c), c.req.header("If-Match")) },
-    reject: { run: async (deps, user, id, _body, c) => rejectAssetRequest(deps, user, id, await noteOf(c), c.req.header("If-Match")) },
+    reject: { schema: rejectBody, run: (deps, user, id, body: RejectBody, c) => rejectAssetRequest(deps, user, id, body.reason, c.req.header("If-Match")) },
     cancel: { run: (deps, user, id) => cancelAssetRequest(deps, user, id) },
     issue: { schema: issueSchema, run: (deps, user, id, body: { asset: string }, c) => issueAssetRequest(deps, user, id, body?.asset, c.req.header("If-Match")) },
   },

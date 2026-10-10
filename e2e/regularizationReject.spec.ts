@@ -36,6 +36,9 @@ test("a filed correction is rejected from the approver's own attendance page, an
   const confirm = manager.getByRole("dialog");
   await expect(confirm.getByText("Reject this request?")).toBeVisible();
   await expect(confirm.getByText(/Eve Employee's correction/)).toBeVisible();
+  // A rejection must say why: the button waits for the reason.
+  await expect(confirm.getByRole("button", { name: "Reject", exact: true })).toBeDisabled();
+  await confirm.getByRole("textbox", { name: "Reason", exact: true }).fill("You were on leave that day");
   await confirm.getByRole("button", { name: "Reject", exact: true }).click();
   await expect(toast(manager, "Correction rejected")).toBeVisible({ timeout: 30_000 });
 
@@ -44,9 +47,10 @@ test("a filed correction is rejected from the approver's own attendance page, an
 
   // Rejection is a "no", not an edit: it never rewrote the day's punches, so nothing to correct was created.
   const after = await employee.request.get(`/v1/attendance-regularizations?page_size=50`);
-  const { results = [] } = (await after.json()) as { results?: { reason?: string; state?: string }[] };
+  const { results = [] } = (await after.json()) as { results?: { reason?: string; state?: string; decision_note?: string }[] };
   const mine = results.find((r) => r.reason === reason);
   expect(mine?.state?.toUpperCase()).toBe("REJECTED");
+  expect(mine?.decision_note).toBe("You were on leave that day");
 });
 
 /** A past weekday nobody has filed a correction for - see `pendingCorrections.spec.ts` for why this dance. */

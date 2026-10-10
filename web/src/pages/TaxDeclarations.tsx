@@ -26,7 +26,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { AccessAction } from "@/components/access/AccessAction";
-import { useConfirm } from "@/components/common/confirm";
+import { useAskReason, useConfirm } from "@/components/common/confirm";
 import { useDeletedToast } from "@/hooks/useSoftDelete";
 import { useToast } from "@/components/ui/use-toast";
 
@@ -46,6 +46,7 @@ export default function TaxDeclarations({ me, openId }: { me: Me; openId?: strin
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { toast } = useToast();
   const confirm = useConfirm();
+  const askReason = useAskReason();
   const deleted = useDeletedToast();
   const { org } = useOrg();
   const money = (n: number) => formatMoney(n, org.default_currency, currencyDecimals(undefined, org));
@@ -114,8 +115,16 @@ export default function TaxDeclarations({ me, openId }: { me: Me; openId?: strin
     }
   }
   async function reject(d: TaxDeclaration) {
-    if (!(await confirm({ title: `Reject the ${d.section} declaration?`, description: "The employee can edit it to fix the problem - saving resubmits it for verification.", destructive: true, confirmLabel: "Reject" }))) return;
-    void act(d, "reject");
+    const reason = await askReason({
+      title: `Reject the ${d.section} declaration?`,
+      description: "The employee is told why, and can edit it to fix the problem - saving resubmits it for verification.",
+      reasonLabel: "Reason",
+      placeholder: "What is wrong with it, or missing from the proof? They will see this.",
+      destructive: true,
+      confirmLabel: "Reject",
+    });
+    if (reason === null) return;
+    await act(d, "reject", { reason });
   }
   async function del(d: TaxDeclaration) {
     if (!(await confirm({ title: "Delete this declaration?", destructive: true, confirmLabel: "Delete" }))) return;
@@ -211,6 +220,7 @@ export default function TaxDeclarations({ me, openId }: { me: Me; openId?: strin
                             <span title={d.status === "VERIFIED" ? "Verified declarations are locked." : d.status === "REJECTED" ? "Edit to fix and resubmit for verification." : undefined}>
                               <Badge variant={STATUS[d.status].variant}>{STATUS[d.status].label}</Badge>
                             </span>
+                            {d.status === "REJECTED" && d.decision_note && <p className="mt-1 text-xs text-muted-foreground">{d.decision_note}</p>}
                           </td>
                           <td data-label="Proof" className="px-3 py-2">
                             <div className="flex flex-wrap items-center justify-end gap-1 sm:justify-start">

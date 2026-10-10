@@ -179,7 +179,7 @@ describe("a claim against an advance", () => {
     const adv = await seedAdvance(emp, 50_000);
     const c = await createReimbursement(deps, actor, { amount: 9_000, advance: `loans/${adv}` });
 
-    await rejectReimbursement(deps, actor, c.uuid);
+    await rejectReimbursement(deps, actor, c.uuid, "Receipt is unreadable");
     expect((await advance(adv)).repaid).toBe(0);
     expect((await claim(c.uuid)).advanceSettled).toBe(0);
     expect(await payable()).toBe(0);

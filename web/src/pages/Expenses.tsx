@@ -60,8 +60,8 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
-import { useConfirm } from "@/components/common/confirm";
-import { confirmDecision, type Decision } from "@/lib/confirmDecision";
+import { useAskReason, useConfirm } from "@/components/common/confirm";
+import { askBulkRejectReason, confirmDecision, type Decision } from "@/lib/confirmDecision";
 import { getSetting } from "@/lib/settingsStore";
 import { advanceRecurrence, categoryBreaches, type CloseCheck, type RecurrenceRule } from "../../../src/domain/expenses";
 
@@ -173,6 +173,7 @@ export default function Expenses({ me }: { me: Me }) {
   const { org } = useOrg();
   const { toast } = useToast();
   const confirm = useConfirm();
+  const askReason = useAskReason();
   const isPhone = useMedia("(max-width: 639px)");
   const money = (n: number) => formatMoney(n, org.default_currency, currencyDecimals(undefined, org));
 
@@ -722,12 +723,14 @@ export default function Expenses({ me }: { me: Me }) {
   const [rejectErr, setRejectErr] = useState<string | null>(null);
   function openReject(r: Expense) { setRejectNote(""); setRejectErr(null); setRejectFor(r); }
   async function confirmReject() {
-    if (!rejectFor) return;
+    // The reason is required (the server refuses a reject without one), so a blank box does nothing - the
+    // button is disabled, and this also covers Cmd/Ctrl+Enter.
+    if (!rejectFor || !rejectNote.trim()) return;
     setRejectBusy(true);
     setRejectErr(null);
     try {
-      // already confirmed: fired by the reject dialog's own button, which collected the note.
-      await invoke("expenses/" + idOf(rejectFor.path), "reject", rejectFor.etag, { note: rejectNote.trim() || null });
+      // already confirmed: fired by the reject dialog's own button, which collected the reason.
+      await invoke("expenses/" + idOf(rejectFor.path), "reject", rejectFor.etag, { reason: rejectNote.trim() });
       toast({ title: "Rejected", variant: "success" });
       setRejectFor(null);
       reloadAll();
@@ -877,7 +880,9 @@ export default function Expenses({ me }: { me: Me }) {
       acts.push({ label: "View invoice", icon: <Eye className="h-4 w-4" />, onClick: () => viewInvoice(r) });
       acts.push({ label: "Download invoice", icon: <Download className="h-4 w-4" />, onClick: () => getInvoice(r) });
     }
-    if ((s === "DRAFT" || s === "SUBMITTED") && (owner || canApprove)) {
+    // An approved expense can still be withdrawn until its money moves (`settled`: payout paid or a card charge
+    // matched); an employee-fronted one takes its unpaid payroll claim with it.
+    if ((s === "DRAFT" || s === "SUBMITTED" || (s === "APPROVED" && !r.settled)) && (owner || canApprove)) {
       acts.push({
         label: r.recurring ? "Stop schedule for good" : "Cancel",
         icon: <Ban className="h-4 w-4" />,
@@ -1263,9 +1268,14 @@ export default function Expenses({ me }: { me: Me }) {
     label: "Reject",
     icon: <X className="h-4 w-4" />,
     destructive: true,
-    confirm: { title: "Reject the selected expenses?", description: "Submitters are notified. A bulk reject carries no reason - reject one at a time to explain why." },
     disabled: (sel) => (sel.every((r) => up(r.state) === "SUBMITTED" && canDo(r, "reject")) ? null : "Only submitted expenses you may reject"),
-    run: (sel) => runBulk("reject", "Rejected", sel),
+    // Asks for ONE reason, sent to every submitter in the selection (its own prompt, so no `confirm` here).
+    // Backing out keeps the whole selection.
+    run: async (sel) => {
+      const reason = await askBulkRejectReason(askReason, sel.length, "expense");
+      if (reason === null) return sel;
+      return runBulk("reject", "Rejected", sel, { reason });
+    },
   };
   const payBulk: BulkAction<Expense> = {
     label: "Mark paid",
@@ -2007,8 +2017,8 @@ export default function Expenses({ me }: { me: Me }) {
               {rejectFor.incurred_on ? ` · ${formatDate(rejectFor.incurred_on)}` : ""}
             </p>
           )}
-          <Field label="Reason" hint="Sent to the submitter with the decision, and kept on the record. Without one they only learn that it was refused.">
-            <Textarea rows={3} autoFocus value={rejectNote} onChange={(e) => setRejectNote(e.target.value)} placeholder="e.g. Missing the vendor invoice - please attach it and file again." />
+          <Field label="Reason" hint="Required. Sent to the submitter with the decision, and kept on the record.">
+            <Textarea rows={3} autoFocus required maxLength={1000} value={rejectNote} onChange={(e) => setRejectNote(e.target.value)} placeholder="e.g. Missing the vendor invoice - please attach it and file again." />
           </Field>
           {/* The same four rejections account for most of them. One tap writes the sentence, still editable -
               a reviewer working a queue shouldn't retype "please attach the invoice" twenty times a week. */}
@@ -2021,7 +2031,7 @@ export default function Expenses({ me }: { me: Me }) {
           </div>
           <DialogFooter>
             <Button variant="outline" disabled={rejectBusy} onClick={() => setRejectFor(null)}>Cancel</Button>
-            <Button variant="destructive" loading={rejectBusy} onClick={confirmReject}><X className="h-4 w-4" /> Reject</Button>
+            <Button variant="destructive" loading={rejectBusy} disabled={!rejectNote.trim()} onClick={confirmReject}><X className="h-4 w-4" /> Reject</Button>
           </DialogFooter>
           </AccessScope>
         </DialogContent>

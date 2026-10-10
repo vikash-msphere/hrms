@@ -96,7 +96,7 @@ describe("deciding a leave request refunds the days with the flip, exactly once"
   it("rejecting puts them back too", async () => {
     const { employeeId, leaveTypeId, actor, id } = await bookTwoDays();
 
-    await rejectLeaveRequest(deps, actor, id);
+    await rejectLeaveRequest(deps, actor, id, "Team is short that week");
 
     expect((await balanceOf(employeeId, leaveTypeId))!.balanceDays).toBe(10);
   });
@@ -107,7 +107,7 @@ describe("deciding a leave request refunds the days with the flip, exactly once"
     // decided. One caller wins, the other is told it was already decided, and the days come back once.
     const { employeeId, leaveTypeId, actor, id } = await bookTwoDays();
 
-    const outcomes = await Promise.allSettled([cancelLeaveRequest(deps, actor, id), rejectLeaveRequest(deps, actor, id)]);
+    const outcomes = await Promise.allSettled([cancelLeaveRequest(deps, actor, id), rejectLeaveRequest(deps, actor, id, "Team is short that week")]);
 
     expect(outcomes.filter((o) => o.status === "fulfilled")).toHaveLength(1);
     expect(outcomes.filter((o) => o.status === "rejected")).toHaveLength(1);

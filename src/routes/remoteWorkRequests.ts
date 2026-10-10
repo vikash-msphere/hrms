@@ -10,6 +10,7 @@ import {
   type RemoteWorkInput,
 } from "../services/remoteWorkRequests";
 import { toRemoteWorkRequestResource } from "../http/serialize";
+import { rejectBody, type RejectBody } from "../http/rejectBody";
 
 const createSchema = z
   .object({
@@ -23,7 +24,7 @@ const createSchema = z
   })
   .strict();
 
-// The approver's optional note is taken as sent, exactly as the hand-written route did.
+// The approver's optional note on an approval, taken as sent. A rejection's reason is required (http/rejectBody.ts).
 const noteOf = async (c: Context<AppEnv>) => (await jsonBody<{ note?: string }>(c)).note;
 
 // Work-from-home requests. Same shape as leave: filed, then approved, rejected or cancelled - never edited or
@@ -50,7 +51,7 @@ export const remoteWorkRequests = collectionRoutes<RemoteWorkInput, typeof schem
   },
   verbs: {
     approve: { run: async (deps, user, id, _body, c) => approveRemoteWorkRequest(deps, user, id, await noteOf(c), c.req.header("If-Match")) },
-    reject: { run: async (deps, user, id, _body, c) => rejectRemoteWorkRequest(deps, user, id, await noteOf(c), c.req.header("If-Match")) },
+    reject: { schema: rejectBody, run: (deps, user, id, body: RejectBody, c) => rejectRemoteWorkRequest(deps, user, id, body.reason, c.req.header("If-Match")) },
     cancel: { run: (deps, user, id) => cancelRemoteWorkRequest(deps, user, id) },
   },
 });

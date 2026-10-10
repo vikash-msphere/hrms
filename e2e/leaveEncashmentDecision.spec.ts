@@ -59,6 +59,7 @@ test("a pending encashment is rejected from its own row, and the balance is unto
     const confirm = page.getByRole("dialog");
     await expect(confirm.getByText("Reject this request?")).toBeVisible({ timeout: 30_000 });
     await expect(confirm.getByText(new RegExp(`${empName}'s encashment of 1 day`))).toBeVisible();
+    await confirm.getByRole("textbox", { name: "Reason", exact: true }).fill("Keep the days for the year-end shutdown");
     await confirm.getByRole("button", { name: "Reject", exact: true }).click();
     await expect(toast(page, "Encashment rejected")).toBeVisible({ timeout: 30_000 });
 

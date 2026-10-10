@@ -375,10 +375,12 @@ test.describe("global search", () => {
       await reject.click();
       const confirmDialog = hr.getByRole("dialog").filter({ hasText: /Reject this/ });
       await expect(confirmDialog).toBeVisible();
+      await confirmDialog.getByRole("textbox", { name: "Reason", exact: true }).fill("Clashes with the release week");
       await confirmDialog.getByRole("button", { name: "Reject", exact: true }).click();
       await expect(toast(hr, "Rejected")).toBeVisible();
-      const after = (await (await employee.request.get(`/v1/${path}`)).json()) as { state?: string };
+      const after = (await (await employee.request.get(`/v1/${path}`)).json()) as { state?: string; decision_note?: string };
       expect(after.state).toBe("REJECTED");
+      expect(after.decision_note).toBe("Clashes with the release week");
     } finally {
       const sup = await as("super");
       await purge(sup, path);

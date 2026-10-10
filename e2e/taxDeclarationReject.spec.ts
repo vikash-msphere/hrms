@@ -34,17 +34,22 @@ test("payroll rejects a declared investment, and the employee can edit it again"
     const confirm = payroll.getByRole("dialog");
     await expect(confirm.getByText(/Reject the .* declaration\?/)).toBeVisible();
     await expect(confirm.getByText(/can edit it to fix the problem/)).toBeVisible();
+    await confirm.getByRole("textbox", { name: "Reason", exact: true }).fill(WHY);
     await confirm.getByRole("button", { name: "Reject", exact: true }).click();
     await expect(toast(payroll, "Declaration rejected")).toBeVisible({ timeout: 30_000 });
     await expect(row).toContainText(/Rejected/i, { timeout: 30_000 });
 
-    // Not locked: unlike a verified one, the employee's own row still offers Edit on a rejected declaration.
+    // Not locked: unlike a verified one, the employee's own row still offers Edit on a rejected declaration,
+    // and says why it was rejected.
     await employee.reload();
     await expect(employee.getByRole("main")).toBeVisible();
     const mineRow = employee.locator("tbody tr").filter({ hasText: label });
     await expect(mineRow).toContainText(/Rejected/i, { timeout: 30_000 });
+    await expect(mineRow).toContainText(WHY);
     await expect(mineRow.getByRole("button", { name: "Edit" })).toBeVisible({ timeout: 30_000 });
   } finally {
     if (declPath) await purge(payroll, declPath);
   }
 });
+
+const WHY = "The receipt is for a different policy";

@@ -41,8 +41,8 @@ import { get, invoke } from "@/api";
 import { fmtDuration, DEFAULT_SCHEDULE, type AttendanceSchedule } from "@/lib/attendance";
 import { useClock, useElapsedMinutes } from "@/lib/clock";
 import { useToast } from "@/components/ui/use-toast";
-import { useConfirm } from "@/components/common/confirm";
-import { confirmDecision } from "@/lib/confirmDecision";
+import { useAskReason, useConfirm } from "@/components/common/confirm";
+import { askDecision } from "@/lib/confirmDecision";
 import { cn, formatDate, formatHHMM, formatMoney, formatTime, idOf } from "@/lib/utils";
 import { addDaysYmd, orgDayFromToday, orgDayOf, todayStr, weekStartYmd } from "@/lib/orgDay";
 import { useApprovals } from "@/lib/approvals";
@@ -68,8 +68,6 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { useAiFeature } from "@/lib/aiFeatures";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Textarea } from "@/components/ui/textarea";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { resolveDashboardShortcuts } from "@/lib/dashboardShortcuts";
 import { AccessAction } from "@/components/access/AccessAction";
@@ -93,9 +91,6 @@ const CAT_ACCENT: Record<KpiCategory, string> = {
   snapshot: "border-l-4 border-l-muted-foreground/30",
 };
 
-// Collections whose :reject verb accepts an optional `note` in the body (relayed to the requester). Mirrors
-// the Approvals inbox.
-const REJECT_NOTE = new Set(["overtime-requests", "remote-work-requests", "late-early-requests"]);
 
 // The dashboard's movable sections, in default order. The viewer drags them into order, or hides them, in the
 // "Customize layout" popover (hero row); the choice persists per user via preferences/dashboard. Rendering uses CSS
@@ -616,26 +611,22 @@ export default function Dashboard({ me }: { me: Me }) {
   // other way round. Taking the larger of the two keeps the badge honest while a queue is still arriving.
   const approvalsAwaiting = Math.max(approvals.total, approvalItems.length);
 
-  // Inline decision state for the approvals card. Approve is one click; reject confirms via a small dialog
-  // (with an optional note where the collection's :reject accepts one), exactly like the Approvals inbox.
+  // Inline decision state for the approvals card. Both verbs ask first, exactly like the Approvals inbox: an
+  // approval on a dashboard sits among widgets people scroll past rather than in a queue they came to work
+  // through, and a rejection asks for the reason the requester is sent.
   const { toast } = useToast();
   const confirm = useConfirm();
+  const askReason = useAskReason();
   const [deciding, setDeciding] = useState<string | null>(null); // path being decided (disables its row buttons)
-  const [rejecting, setRejecting] = useState<ApprovalItem | null>(null);
-  const [rejectNote, setRejectNote] = useState("");
-  async function decideInline(it: ApprovalItem, verb: "approve" | "reject", note?: string) {
-    // Rejection arrives from its own dialog (which collects the note); approval is the bare click, and on a
-    // dashboard it sits among widgets people scroll past rather than in a queue they came to work through.
+  async function decideInline(it: ApprovalItem, verb: "approve" | "reject") {
     const who = it.employee ? employees.find((e) => idOf(e.path) === idOf(it.employee!)) : undefined;
     const whose = who ? `${who.first_name} ${who.last_name}'s` : "this";
-    if (verb === "approve" && !(await confirmDecision(confirm, "approve", `${whose} ${it.kind.toLowerCase()} request (${it.desc})`))) return;
+    const body = await askDecision({ confirm, askReason }, verb, `${whose} ${it.kind.toLowerCase()} request (${it.desc})`);
+    if (body === null) return;
     setDeciding(it.path);
     try {
-      const body = verb === "reject" && note?.trim() && REJECT_NOTE.has(it.collection) ? { note: note.trim() } : undefined;
       await invoke(`${it.collection}/${idOf(it.path)}`, verb, it.etag, body);
       toast({ title: verb === "approve" ? "Approved" : "Rejected", variant: "success" });
-      setRejecting(null);
-      setRejectNote("");
       // No approvals.reload() here: invoke() already invalidates the decided collection, which refreshes
       // the shared approvals provider without re-fetching all eight request collections.
     } catch (e) {
@@ -1487,7 +1478,7 @@ export default function Dashboard({ me }: { me: Me }) {
                       )}
                       {it.can.includes("reject") && (
                         <AccessAction collection={it.collection} objectPath={it.path} verb="reject" can={it.can} label="Reject">
-                          <Button size="sm" variant="ghost" className="text-destructive" disabled={busy} onClick={() => { setRejecting(it); setRejectNote(""); }} aria-label={`Reject ${it.kind.toLowerCase()}`}>
+                          <Button size="sm" variant="ghost" className="text-destructive" disabled={busy} onClick={() => decideInline(it, "reject")} aria-label={`Reject ${it.kind.toLowerCase()}`}>
                             <X className="h-4 w-4" />
                           </Button>
                         </AccessAction>
@@ -1505,32 +1496,6 @@ export default function Dashboard({ me }: { me: Me }) {
           </CardContent>
         </Card>
       )}
-
-      {/* Reject confirmation: prevents an accidental one-click reject and, where the collection supports it,
-          carries an optional note to the requester. */}
-      <Dialog open={!!rejecting} onOpenChange={(o) => { if (!o) setRejecting(null); }}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>Reject this {rejecting?.kind.toLowerCase()}?</DialogTitle>
-            {/* Same value as the row above, so the same mask. */}
-            <DialogDescription data-sentry-mask>{rejecting?.desc}</DialogDescription>
-          </DialogHeader>
-          {rejecting && REJECT_NOTE.has(rejecting.collection) && (
-            <Textarea
-              value={rejectNote}
-              onChange={(e) => setRejectNote(e.target.value)}
-              placeholder="Reason for rejecting (optional, shared with the requester)"
-              rows={3}
-            />
-          )}
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setRejecting(null)}>Cancel</Button>
-            <Button variant="destructive" loading={deciding === rejecting?.path} onClick={() => rejecting && decideInline(rejecting, "reject", rejectNote)}>
-              <X className="h-4 w-4" /> Reject
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
 
       {/* Under flexible hours nobody is late or early by definition, so there is nothing for this to draw. */}
       {showSection("punctuality") && canPunctuality && !schedule.flexible_hours && (

@@ -263,7 +263,7 @@ export const EVENT_TYPES: EventTypeDef[] = [
   // Performance: agile kanban cards. `board` is the board ref, `column` the destination column key. These are
   // the feedback-loop hooks: notify on delivery, escalate a blocked card, or (with board goal roll-up) chain
   // `card.delivered` -> advance the linked goal.
-  { type: "card.created", label: "Card created", module: "Performance", subjectCollection: "cards", fields: [{ name: "board", type: "ref" }, { name: "column", type: "string" }, { name: "priority", type: "string" }] },
+  { type: "card.created", label: "Card created", module: "Performance", subjectCollection: "cards", fields: [{ name: "board", type: "ref" }, { name: "column", type: "string" }, { name: "priority", type: "string" }, { name: "taskType", type: "string" }] },
   { type: "card.moved", label: "Card moved", module: "Performance", subjectCollection: "cards", fields: [{ name: "board", type: "ref" }, { name: "from", type: "string" }, { name: "to", type: "string" }] },
   { type: "card.committed", label: "Card committed", module: "Performance", subjectCollection: "cards", fields: [{ name: "board", type: "ref" }, { name: "column", type: "string" }] },
   { type: "card.blocked", label: "Card blocked", module: "Performance", subjectCollection: "cards", fields: [{ name: "board", type: "ref" }, { name: "reason", type: "string" }] },

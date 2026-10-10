@@ -7,6 +7,7 @@ import {
   type TimeEntryInput,
 } from "../services/timeEntries";
 import { toTimeEntryResource } from "../http/serialize";
+import { rejectBody, type RejectBody } from "../http/rejectBody";
 
 const writeSchema = z.object({
   employee: z.string().nullable().optional(),
@@ -36,6 +37,6 @@ export const timeEntries = collectionRoutes<TimeEntryInput, typeof schema.timeEn
   verbs: {
     submit: { run: (deps, user, id) => submitTimeEntry(deps, user, id) },
     approve: { run: (deps, user, id, _body, c) => approveTimeEntry(deps, user, id, c.req.header("If-Match")) },
-    reject: { run: (deps, user, id, _body, c) => rejectTimeEntry(deps, user, id, c.req.header("If-Match")) },
+    reject: { schema: rejectBody, run: (deps, user, id, body: RejectBody, c) => rejectTimeEntry(deps, user, id, body.reason, c.req.header("If-Match")) },
   },
 });

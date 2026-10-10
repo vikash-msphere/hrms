@@ -81,14 +81,23 @@ test("an employee claims an expense back and the claims desk approves it", async
     approver.locator("div").filter({ hasText: onRow }).filter({ has: approver.getByRole("button", { name: "Approve", exact: true }) }),
   ).toHaveCount(0, { timeout: 30_000 });
 
-  // The employee looks again: the claim has left their live requests for their history, decided. Either word,
-  // not just "Approved": a payroll run's own cron sweep can pay an approved reimbursement out before this
-  // check ever runs (this suite's own payroll specs build and pay runs constantly under 16-worker load), and
-  // "Paid" is Approved having moved one step further, not a wrong state this test caused.
+  // The employee looks again: the claim is decided. Approved-but-unpaid stays among their live requests (it can
+  // still be withdrawn); once paid it is history. Either is right: a payroll run's own cron sweep can pay an
+  // approved reimbursement out before this check ever runs (this suite's own payroll specs build and pay runs
+  // constantly under 16-worker load), and "Paid" is Approved having moved one step further, not a wrong state
+  // this test caused.
   await employee.reload();
   await expect(employee.getByRole("main")).toBeVisible();
-  await employee.getByRole("tab", { name: /^History/ }).click();
-  await expect(employee.locator("tbody tr").filter({ hasText: onRow })).toContainText(/Approved|Paid/i);
+  await expect(async () => {
+    await employee.getByRole("tab", { name: /^Requests/ }).click();
+    const live = employee.locator("tbody tr").filter({ hasText: onRow });
+    if (await live.count()) {
+      await expect(live).toContainText(/Approved/i);
+      return;
+    }
+    await employee.getByRole("tab", { name: /^History/ }).click();
+    await expect(employee.locator("tbody tr").filter({ hasText: onRow })).toContainText(/Paid/i);
+  }).toPass({ timeout: 30_000 });
 });
 
 /** Today, as a date input wants it. */

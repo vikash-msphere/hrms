@@ -19,7 +19,7 @@ import { emitEvent } from "./eventBus";
 import { createApprovedReimbursementForExpense } from "./reimbursements";
 import { invalidArgument, notFound, failedPrecondition } from "../lib/errors";
 import { keysetPage } from "./keysetPage";
-import { byIdChunks } from "../lib/dbBatch";
+import { byIdChunks, runBatchChecked } from "../lib/dbBatch";
 import { getSettingValue } from "./settings";
 import { attachedObjectIds } from "./attachments";
 import { orgToday, dayStartMs } from "./orgDay";
@@ -31,7 +31,7 @@ import { budgetPhase, budgetProjection, computeBudgetSpendMany, computeBudgetSpe
 import { unclaimedCardTotals } from "./cardStatements";
 import type { CloseCheck } from "../domain/expenses";
 import { visibleByDelete } from "./softDelete";
-import { assertNotSubject, assertReviewedVersion } from "./decisionGuard";
+import { assertNotSubject, assertReviewedVersion, requireRejectReason } from "./decisionGuard";
 
 export type ExpenseInput = {
   employee?: string | null;
@@ -611,33 +611,97 @@ async function approve(deps: Deps, actor: AppUser, id: string, ifMatch: string |
 
 // A rejection carries its reason: the submitter is told WHY (in the notification and on the record), so the
 // next attempt can fix the thing that was wrong instead of guessing.
-export async function rejectExpense(deps: Deps, actor: AppUser, id: string, note?: string | null, ifMatch?: string) {
+export async function rejectExpense(deps: Deps, actor: AppUser, id: string, rawReason: string, ifMatch?: string) {
+  const reason = requireRejectReason(rawReason);
   const row = await getExpense(deps, actor, id);
   if (row.state !== "SUBMITTED") throw failedPrecondition("only submitted expenses can be rejected");
   assertReviewedVersion(row, ifMatch);
-  const reason = (note ?? "").trim() || null;
   const [updated] = await deps.db
     .update(schema.expenses)
     .set({ state: "REJECTED", decidedBy: actor.uuid, decisionNote: reason, updatedAt: new Date() })
     .where(and(eq(schema.expenses.uuid, id), eq(schema.expenses.state, "SUBMITTED")))
     .returning();
   if (!updated) throw failedPrecondition("only submitted expenses can be rejected");
-  await audit(deps, actor, "expense.reject", "expenses", id, stateMeta(row.state, "REJECTED", { employee: `employees/${row.employeeId}`, ...(reason ? { reason } : {}) }), updated);
-  await notify(deps, { recipient: row.employeeId, type: "expense.rejected", title: "Expense rejected", body: reason ? `Your expense was rejected: ${reason}` : "Your expense was rejected.", link: "expenses", subject: `expenses/${id}`, actorId: actor.employeeId });
+  await audit(deps, actor, "expense.reject", "expenses", id, stateMeta(row.state, "REJECTED", { employee: `employees/${row.employeeId}`, reason }), updated);
+  await notify(deps, { recipient: row.employeeId, type: "expense.rejected", title: "Expense rejected", body: `Your expense was rejected: ${reason}`, link: "expenses", subject: `expenses/${id}`, actorId: actor.employeeId });
   await emitEvent(deps, actor, "expense.rejected", { subject: `expenses/${id}`, employeeId: row.employeeId, payload: { amount: row.amount, note: reason } });
   return updated;
 }
 
+// Cancel withdraws a draft or a submitted expense, and also an APPROVED one nobody has paid yet - the spend is
+// no longer needed. Paying is what makes it final: a PAID expense, an employee-fronted one whose payroll claim
+// a run or a settlement has already paid, or one a company-card charge is matched to (that money is already
+// spent) stays as it is. Cancelling an approved recurring template stops its schedule, as it does a draft one.
+//
+// `settledExpenseIds` answers the "already settled" half for a page of rows, so the list can hide Cancel on the
+// approved rows this would refuse. Only APPROVED rows are asked about, in one query per page; a page without
+// any costs no read.
+export async function settledExpenseIds(deps: Deps, rows: readonly { uuid: string; state: string }[]): Promise<Set<string>> {
+  const ids = rows.filter((r) => r.state === "APPROVED").map((r) => r.uuid);
+  const e = schema.expenses;
+  const hits = await byIdChunks(ids, (group) => deps.db
+    .select({ uuid: e.uuid })
+    .from(e)
+    .where(and(inArray(e.uuid, group), sql`(
+      exists (select 1 from ${schema.cardTransactions} where ${schema.cardTransactions.expenseId} = ${e.uuid})
+      or exists (select 1 from ${schema.reimbursements} where ${schema.reimbursements.uuid} = ${e.reimbursementId} and ${schema.reimbursements.state} = 'PAID')
+    )`)));
+  return new Set(hits.map((h) => h.uuid));
+}
+
 export async function cancelExpense(deps: Deps, actor: AppUser, id: string) {
   const row = await getExpense(deps, actor, id);
-  if (row.state !== "DRAFT" && row.state !== "SUBMITTED") throw failedPrecondition("only draft or submitted expenses can be cancelled");
-  const [updated] = await deps.db
-    .update(schema.expenses)
-    .set({ state: "CANCELLED", updatedAt: new Date() })
-    .where(and(eq(schema.expenses.uuid, id), eq(schema.expenses.state, row.state)))
-    .returning();
-  if (!updated) throw failedPrecondition("only draft or submitted expenses can be cancelled");
-  await audit(deps, actor, "expense.cancel", "expenses", id, stateMeta(row.state, "CANCELLED", { employee: `employees/${row.employeeId}` }), updated);
+  const stuck = "only draft, submitted or unpaid approved expenses can be cancelled";
+  if (row.state !== "DRAFT" && row.state !== "SUBMITTED" && row.state !== "APPROVED") throw failedPrecondition(stuck);
+  if (row.state === "APPROVED") {
+    const charge = (await deps.db.select({ uuid: schema.cardTransactions.uuid }).from(schema.cardTransactions).where(eq(schema.cardTransactions.expenseId, id)).limit(1))[0];
+    if (charge) throw failedPrecondition("a company card charge is matched to this expense, so the money is already spent");
+  }
+  const at = new Date();
+  // An approved employee-fronted expense became an APPROVED reimbursement (the payroll payout). It is withdrawn
+  // WITH the expense, in one batch. A batch reports a short count, it does not roll an earlier statement back,
+  // so each half carries the other's condition: the expense flips only while the payout is still unpaid, and
+  // the payout flips only once the expense has. A run that claimed the payout in between leaves both untouched,
+  // never an expense cancelled under a claim that still pays out, nor the reverse.
+  const payoutId = row.state === "APPROVED" ? row.reimbursementId : null;
+  const r = schema.reimbursements;
+  const flip = {
+    stmt: deps.db
+      .update(schema.expenses)
+      .set({ state: "CANCELLED", updatedAt: at })
+      .where(and(
+        eq(schema.expenses.uuid, id),
+        eq(schema.expenses.state, row.state),
+        ...(payoutId ? [sql`exists (select 1 from ${r} where ${r.uuid} = ${payoutId} and ${r.state} = 'APPROVED' and ${r.paidRunId} is null)`] : []),
+      ))
+      .returning(),
+    expect: 1,
+    label: "cancel the expense",
+  };
+  const payout = payoutId
+    ? [{
+        stmt: deps.db
+          .update(r)
+          .set({ state: "CANCELLED", decidedBy: actor.uuid, updatedAt: at })
+          .where(and(
+            eq(r.uuid, payoutId),
+            eq(r.state, "APPROVED"),
+            isNull(r.paidRunId),
+            sql`exists (select 1 from ${schema.expenses} where ${schema.expenses.uuid} = ${id} and ${schema.expenses.state} = 'CANCELLED')`,
+          ))
+          .returning({ uuid: r.uuid }),
+        expect: 1,
+        label: "withdraw the payroll payout",
+      }]
+    : [];
+  if ((await runBatchChecked(deps.db, [flip, ...payout])).length) {
+    // Tell the two apart only when it matters to the caller: a payout that has been paid is a different answer
+    // from an expense somebody else already moved.
+    const paid = payoutId && (await deps.db.select({ state: r.state }).from(r).where(eq(r.uuid, payoutId)).limit(1))[0]?.state === "PAID";
+    throw failedPrecondition(paid ? "the payroll payout for this expense has already been paid, so it cannot be cancelled" : stuck);
+  }
+  const updated = (await deps.db.select().from(schema.expenses).where(eq(schema.expenses.uuid, id)).limit(1))[0]!;
+  await audit(deps, actor, "expense.cancel", "expenses", id, stateMeta(row.state, "CANCELLED", { employee: `employees/${row.employeeId}`, ...(payoutId ? { reimbursement: `reimbursements/${payoutId}` } : {}) }), updated);
   return updated;
 }
 

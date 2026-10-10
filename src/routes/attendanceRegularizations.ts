@@ -7,6 +7,7 @@ import {
   type RegularizationInput,
 } from "../services/attendanceRegularizations";
 import { toAttendanceRegularizationResource } from "../http/serialize";
+import { rejectBody, type RejectBody } from "../http/rejectBody";
 
 const createSchema = z
   .object({
@@ -40,7 +41,7 @@ export const attendanceRegularizations = collectionRoutes<RegularizationInput, t
   },
   verbs: {
     approve: { run: (deps, user, id, _body, c) => approveRegularization(deps, user, id, c.req.header("If-Match")) },
-    reject: { run: (deps, user, id, _body, c) => rejectRegularization(deps, user, id, c.req.header("If-Match")) },
+    reject: { schema: rejectBody, run: (deps, user, id, body: RejectBody, c) => rejectRegularization(deps, user, id, body.reason, c.req.header("If-Match")) },
     cancel: { run: (deps, user, id) => cancelRegularization(deps, user, id) },
   },
 });

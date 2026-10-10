@@ -11,23 +11,18 @@ import { AccessAction } from "@/components/access/AccessAction";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Textarea } from "@/components/ui/textarea";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
-import { useConfirm } from "@/components/common/confirm";
-import { confirmDecision } from "@/lib/confirmDecision";
+import { useAskReason, useConfirm } from "@/components/common/confirm";
+import { askRejectReason, confirmDecision } from "@/lib/confirmDecision";
 import { useSelfApprovalAllowed } from "@/lib/approvals";
 
 // One pending request, rendered the same wherever a decision can be made: the unified Approvals inbox, and the
 // per-feature pages that surface their own slice of the queue (Leaves' "Pending your decision" band). Shared so
 // the two can't drift on what an approver sees - the waiting time, the per-object ACL gate, and the reject-with-
-// note confirmation are decision-safety properties, not decoration.
+// a-reason prompt are decision-safety properties, not decoration.
 
 // The minimum shape every approvable row shares: an id/etag and the per-object verb hints the server attaches.
 export type Approvable = { path: string; etag?: string; create_time?: string; update_time?: string; access?: { can?: string[] } };
-
-// Collections whose :reject verb accepts an optional `note` in the body (relayed to the requester).
-export const REJECT_NOTE = new Set(["overtime-requests", "remote-work-requests", "late-early-requests", "asset-requests", "expenses"]);
 
 // How long a request has been sitting in the inbox, from its create time.
 export const waitingDays = (t?: string) => (t ? Math.max(0, Math.floor((Date.now() - +new Date(t)) / 86_400_000)) : 0);
@@ -67,7 +62,8 @@ export function ApprovalRow({
   // History mode: the terminal state to badge (approved/rejected/…); no action buttons, no waiting label.
   decidedState?: string;
   onApproved: (path: string) => void;
-  onRejectClick: () => void;
+  // Usually `() => reject(target)` from useRejectRequest; the Reject button spins on the promise it returns.
+  onRejectClick: () => unknown;
   // Multi-select for bulk approve/reject (pending mode only). Undefined = row not selectable.
   checked?: boolean;
   onCheckedChange?: () => void;
@@ -163,8 +159,8 @@ export function isAwaitingDecision(collection: string, row: object): boolean {
 // Approve / Reject on ONE request, wherever it is listed: the inbox row above, and the requester's own record
 // (components/common/EmployeeRequests.tsx, the profile's leave history, the asset card). Shared so every surface
 // asks the same confirmation and gates on the same things: the request is still awaiting a decision, and the
-// row's own `access.can` names the verb (hidden otherwise, never disabled). Reject only calls back - its dialog
-// (RejectDialog, below) collects the note and belongs to the caller.
+// row's own `access.can` names the verb (hidden otherwise, never disabled). Reject only calls back - the caller
+// owns the rejection (useRejectRequest, below, asks for the required reason and fires it).
 //
 // `own`: the viewer's own request. The server refuses deciding one's own in one's favour unless the org allows
 // self-approval (services/decisionGuard.ts), so the buttons are not offered there either.
@@ -184,7 +180,7 @@ export function DecisionButtons({
   what: string;
   own?: boolean;
   onApproved?: (path: string) => void;
-  onRejectClick: () => void;
+  onRejectClick: () => unknown;
   // The flex sizing lives on a wrapper, not on AccessAction: that component renders its children through
   // AccessTarget and takes no class of its own.
   wrapClassName?: string;
@@ -197,8 +193,8 @@ export function DecisionButtons({
   const can = row.access?.can ?? [];
   const ref = { collection, objectPath: row.path, can };
   // Approving is one click next to a dozen identical rows, and it notifies the requester and commits whatever
-  // they asked for. Rejection already goes through its own dialog (it takes a note), so this is the half that
-  // was missing.
+  // they asked for. Rejection already asks (for its reason, through the caller), so this is the half that was
+  // missing.
   async function approve() {
     if (!(await confirmDecision(confirm, "approve", what))) return;
     setBusy(true);
@@ -225,7 +221,7 @@ export function DecisionButtons({
       {can.includes("reject") && (
         <span className={wrapClassName}>
           <AccessAction {...ref} verb="reject" label="Reject">
-            <Button size="sm" variant="outline" disabled={busy} onClick={onRejectClick} className={buttonClassName}><X className="h-4 w-4" /> Reject</Button>
+            <Button size="sm" variant="outline" disabled={busy} onClick={() => onRejectClick()} className={buttonClassName}><X className="h-4 w-4" /> Reject</Button>
           </AccessAction>
         </span>
       )}
@@ -241,65 +237,29 @@ export function DecidedBadge({ state }: { state: string }) {
   return <Badge variant={variant} className="shrink-0">{label}</Badge>;
 }
 
-// What the reject dialog is acting on.
+// What a rejection is acting on: the request, and how the row described it.
 export type RejectTarget = { collection: string; row: Approvable; name: string; summary: React.ReactNode };
 
-// Reject confirmation: prevents the accidental one-click reject and, where the API supports it, carries an
-// optional note back to the requester explaining why.
-export function RejectDialog({ target, onClose, onRejected }: { target: RejectTarget | null; onClose: () => void; onRejected: (path: string) => void }) {
+/**
+ * Reject ONE request from wherever it is listed. Asks for the reason (lib/confirmDecision.ts#askRejectReason -
+ * required, and sent to the requester), then fires `:reject` against the version the row was drawn from.
+ * Resolves true when it was rejected, so a caller's button can spin on the returned promise. `onRejected` is
+ * the caller's settle/reload.
+ */
+export function useRejectRequest(onRejected?: (path: string) => void) {
   const { toast } = useToast();
-  const [note, setNote] = useState("");
-  const [busy, setBusy] = useState(false);
-  const supportsNote = !!target && REJECT_NOTE.has(target.collection);
-  async function reject() {
-    if (!target) return;
-    setBusy(true);
+  const ask = useAskReason();
+  return React.useCallback(async (target: RejectTarget): Promise<boolean> => {
+    const reason = await askRejectReason(ask, `${target.name}'s request`, target.summary);
+    if (reason === null) return false;
     try {
-      // already confirmed: this runs from the reject dialog's own button, which collected the reason.
-      await invoke(`${target.collection}/${idOf(target.row.path)}`, "reject", target.row.etag, supportsNote && note.trim() ? { note: note.trim() } : undefined);
+      await invoke(`${target.collection}/${idOf(target.row.path)}`, "reject", target.row.etag, { reason });
       toast({ title: "Rejected", variant: "success" });
-      onRejected(target.row.path);
-      onClose();
+      onRejected?.(target.row.path);
+      return true;
     } catch (e) {
       toast({ title: "Couldn't update", description: (e as Error).message, variant: "destructive" });
-    } finally {
-      setBusy(false);
+      return false;
     }
-  }
-  return (
-    <Dialog open={!!target} onOpenChange={(o) => { if (!o && !busy) { setNote(""); onClose(); } }}>
-      <DialogContent
-        className="max-w-md"
-        onKeyDown={(e) => {
-          // Enter rejects unless typing in the note (where Enter should make a new line).
-          if (e.key === "Enter" && !(e.target instanceof HTMLTextAreaElement)) {
-            e.preventDefault();
-            if (!busy) void reject();
-          }
-        }}
-      >
-        <DialogHeader>
-          <DialogTitle>Reject this request?</DialogTitle>
-          <DialogDescription>
-            {target?.name}
-            {/* The same summary as the row, so the same mask - and a dialog is a portal outside
-                `<main data-page="…">`, so no route mask could reach it either way. */}
-            {target?.summary ? <> · <span data-sentry-mask>{target.summary}</span></> : null}
-          </DialogDescription>
-        </DialogHeader>
-        {supportsNote && (
-          <Textarea
-            autoFocus
-            placeholder="Reason for rejecting (optional, shared with the requester)"
-            value={note}
-            onChange={(e) => setNote(e.target.value)}
-          />
-        )}
-        <DialogFooter>
-          <Button variant="outline" disabled={busy} onClick={() => { setNote(""); onClose(); }}>Keep pending</Button>
-          <Button variant="destructive" loading={busy} onClick={reject}><X className="h-4 w-4" /> Reject request</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
+  }, [ask, toast, onRejected]);
 }

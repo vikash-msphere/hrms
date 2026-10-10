@@ -28,13 +28,13 @@ import { RequestsHistoryTabs, type RequestsHistorySearch } from "@/components/co
 import { SummaryStrip, type SummaryItem } from "@/components/common/SummaryStrip";
 import { PhotoAvatar } from "@/components/common/PhotoAvatar";
 import { TruncationNotice } from "@/components/common/TruncationNotice";
-import { ApprovalRow, RejectDialog, type RejectTarget } from "@/components/common/ApprovalRow";
+import { ApprovalRow, useRejectRequest } from "@/components/common/ApprovalRow";
 import { ActivitySection } from "@/components/common/ActivitySection";
 import { RowActivityButton } from "@/components/common/RowActivityButton";
 import { withNewBadge } from "@/components/common/NewBadge";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { type TableInsight } from "@/components/common/TableInsights";
-import { metaColumns } from "@/components/common/metaColumns";
+import { decisionNoteColumn, metaColumns } from "@/components/common/metaColumns";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { RequestLeaveDialog } from "@/components/common/RequestLeaveDialog";
 import { EmptyState } from "@/components/common/EmptyState";
@@ -147,7 +147,8 @@ export default function Leaves({ me }: { me: Me }) {
   // the band empties as the approver works even before the refetch lands.
   const approvals = useApprovals();
   const [decided, setDecided] = useState<Set<string>>(new Set());
-  const [rejecting, setRejecting] = useState<RejectTarget | null>(null);
+  // Reject asks for the required reason, the same way the inbox does.
+  const reject = useRejectRequest((path) => { setDecided((d) => new Set(d).add(path)); approvals.reload(); reloadAll(); });
   const pendingForMe = useMemo(
     () => approvals.leaves.filter((r) => !decided.has(r.path)).sort((a, b) => (a.create_time ?? "").localeCompare(b.create_time ?? "")),
     [approvals.leaves, decided],
@@ -660,7 +661,8 @@ export default function Leaves({ me }: { me: Me }) {
       </div>
     ),
   };
-  const historyCols = withNewBadge(canDecide ? [empCol, ...baseCols, ...metaColumns<LeaveRequest>(), activityCol] : [...baseCols, ...metaColumns<LeaveRequest>(), activityCol]);
+  const noteCol = decisionNoteColumn<LeaveRequest>();
+  const historyCols = withNewBadge(canDecide ? [empCol, ...baseCols, noteCol, ...metaColumns<LeaveRequest>(), activityCol] : [...baseCols, noteCol, ...metaColumns<LeaveRequest>(), activityCol]);
 
   const requestBtn = (
     <AccessAction collection="leave-requests" create label="Request leave">
@@ -1123,7 +1125,7 @@ export default function Leaves({ me }: { me: Me }) {
                 summary={leaveSummary(r, typeName)}
                 context={leaveDecisionContext(r, balances, rows)}
                 onApproved={(path) => { setDecided((d) => new Set(d).add(path)); approvals.reload(); reloadAll(); }}
-                onRejectClick={() => setRejecting({ collection: "leave-requests", row: r, name: empName(r.employee), summary: leaveSummary(r, typeName) })}
+                onRejectClick={() => reject({ collection: "leave-requests", row: r, name: empName(r.employee), summary: leaveSummary(r, typeName) })}
               />
             ))}
           </div>
@@ -1359,7 +1361,7 @@ export default function Leaves({ me }: { me: Me }) {
                     </Button>
                   </AccessAction>
                   <AccessAction collection="leave-requests" objectPath={detailRow.path} verb="reject" can={detailRow.access?.can} label="Reject">
-                    <Button variant="outline" onClick={() => { const r = detailRow; setDetailPath(null); setRejecting({ collection: "leave-requests", row: r, name: empName(r.employee), summary: leaveSummary(r, typeName) }); }}>
+                    <Button variant="outline" onClick={() => { const r = detailRow; setDetailPath(null); return reject({ collection: "leave-requests", row: r, name: empName(r.employee), summary: leaveSummary(r, typeName) }); }}>
                       <X className="h-4 w-4" /> Reject
                     </Button>
                   </AccessAction>
@@ -1386,12 +1388,6 @@ export default function Leaves({ me }: { me: Me }) {
 
       <input ref={fileRef} type="file" className="hidden" onChange={onDocumentPicked} accept="image/*,application/pdf" />
       {open && <RequestLeaveDialog open={open} onOpenChange={setOpen} me={me} initial={draft} onSubmitted={reloadAll} />}
-      {/* Same confirm-with-note step the inbox uses - a one-click reject is too easy to do by accident. */}
-      <RejectDialog
-        target={rejecting}
-        onClose={() => setRejecting(null)}
-        onRejected={(path) => { setDecided((d) => new Set(d).add(path)); approvals.reload(); reloadAll(); }}
-      />
     </div>
   );
 }
